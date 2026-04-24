@@ -21,6 +21,7 @@ requires one return value. For example, modal_controller returns:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import platform
 import sys
@@ -30,7 +31,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Final
 
-from dash import Dash, Input, Output, State, ctx, html, no_update
+from dash import ALL, Dash, Input, Output, State, ctx, html, no_update
 
 from app_dirs import open_folder
 from config import COORD_PRECISION, MY_LOCATION, POLL_INTERVAL_MS, ZOOM_NEAR_KM
@@ -39,6 +40,7 @@ from model.model import Model
 from model.netinfo import NetInfo
 from model.public_ip import iter_public_ip_candidates
 from runtime import AppMeta, RuntimeContext, build_runtime
+from state.insights import process_insights
 from state.keyboard import build_key_action
 from state.menu import compute_menu_open_state
 from state.modal import decide_modal_route
@@ -53,6 +55,7 @@ from state.poll import (
 from state.status_cache import StatusCache
 from state.status_line import render_status_text
 from ui.cache_view import CacheViewBuilder
+from ui.insights_view import render_insights_panel
 from ui.layout_view import render_layout
 from ui.map_view import MapUI
 from ui.modal_view import ModalTextBuilder
@@ -136,14 +139,23 @@ class TapMap:
             ],
         }
 
+        self.insights = {
+            "state": {},
+            "meta": {},
+            "ui": {
+                "expanded_ip": None,
+            },
+        }
+
+        self.insights_path = self.runtime.app_data_dir / "insights.json"
+        self._load_insights()
+        self._last_insights_save = 0.0
+
         start_fig = self.ui.create_figure(([], self.my_location))
         self.app.layout = self._build_layout(start_fig)
         self._register_callbacks()
 
-    # ----------------------------
     # Layout helpers (CSS classes)
-    # ----------------------------
-
     @staticmethod
     def _menu_panel_class(is_open: bool) -> str:
         return "mx-panel is-open" if is_open else "mx-panel"
@@ -351,6 +363,8 @@ class TapMap:
             self.view_builder.debug_coords(updated_cache)
 
         view = self.view_builder.build_view_from_cache(updated_cache)
+        self._maybe_save_insights()
+
         return snap, updated_cache, status_cache.to_store(), view, no_update
 
     def _open_browser(self, url: str, delay_s: float = 0.8) -> None:
@@ -524,9 +538,11 @@ class TapMap:
 
         @self.app.callback(
             Output("menu_open", "data"),
+            Output("insights_on", "data"),
             Input("btn_menu", "n_clicks"),
             Input("menu_overlay", "n_clicks"),
             Input("key_action", "data"),
+            Input("menu_insights", "n_clicks"),
             Input("menu_open_ports", "n_clicks"),
             Input("menu_unmapped", "n_clicks"),
             Input("menu_lan_local", "n_clicks"),
@@ -536,12 +552,14 @@ class TapMap:
             Input("menu_clear_cache", "n_clicks"),
             Input("menu_recheck_geoip", "n_clicks"),
             State("menu_open", "data"),
+            State("insights_on", "data"),
             prevent_initial_call=True,
         )
         def menu_controller(
             _btn: int,
             _overlay: int,
             key_action: Any,
+            _insights: int,
             _open_ports: int,
             _unmapped: int,
             _lan_local: int,
@@ -551,8 +569,16 @@ class TapMap:
             _clear: int,
             _recheck: int,
             menu_open: Any,
+            insights_on: Any,
         ) -> Any:
             trigger = ctx.triggered_id
+
+            if trigger == "menu_insights" or (
+                trigger == "key_action"
+                and isinstance(key_action, dict)
+                and key_action.get("action") == "menu_insights"
+            ):
+                return False, not bool(insights_on)
 
             next_state = compute_menu_open_state(
                 trigger=trigger,
@@ -563,8 +589,8 @@ class TapMap:
             )
 
             if next_state is None:
-                return no_update
-            return next_state
+                return no_update, no_update
+            return next_state, no_update
 
         @self.app.callback(
             Output("menu_panel", "className"),
@@ -574,6 +600,24 @@ class TapMap:
         def show_hide_menu(is_open: Any) -> tuple[str, str]:
             open_flag = bool(is_open)
             return self._menu_panel_class(open_flag), self._menu_overlay_class(open_flag)
+        
+        @self.app.callback(
+            Output("insights_panel", "className"),
+            Input("insights_on", "data"),
+        )
+        def toggle_insights_panel(is_on: Any) -> str:
+            if bool(is_on):
+                return "insights-panel is-open"
+            return "insights-panel"
+        
+        @self.app.callback(
+            Output("map", "style"),
+            Input("insights_on", "data"),
+        )
+        def resize_map(is_on: Any) -> dict[str, str]:
+            if bool(is_on):
+                return {"width": "calc(100% - 270px)"}
+            return {"width": "100%"}
 
         @self.app.callback(
             Output("modal_state", "data"),
@@ -692,8 +736,9 @@ class TapMap:
         @self.app.callback(
             Output("map", "figure"),
             Input("ui_view", "data"),
+            Input("selected_country", "data"),
         )
-        def render_map(ui_view: Any) -> Any:
+        def render_map(ui_view: Any, selected_country: Any) -> Any:
             view = self._ensure_dict(ui_view)
 
             if "points" not in view:
@@ -703,9 +748,17 @@ class TapMap:
             summaries = self._ensure_dict(view.get("summaries"))
 
             if not points:
-                return self.ui.create_figure(([], self.my_location), summaries=summaries)
+                return self.ui.create_figure(
+                    ([], self.my_location),
+                    summaries=summaries,
+                    selected_country=selected_country,
+                )
 
-            return self.ui.create_figure((points, self.my_location), summaries=summaries)
+            return self.ui.create_figure(
+                (points, self.my_location),
+                summaries=summaries,
+                selected_country=selected_country,
+            )
 
         @self.app.callback(
             Output("status_bar", "children"),
@@ -726,6 +779,69 @@ class TapMap:
                 to_int=self._to_int,
             )
 
+        @self.app.callback(
+            Output("insights_panel", "children"),
+            Input("insights_cache", "data"),
+        )
+        def update_insights(data: dict[str, Any] | None) -> list[Any]:
+            if not isinstance(data, dict):
+                return []
+
+            return render_insights_panel(data)
+        
+        @self.app.callback(
+            Output("selected_country", "data"),
+            Input(
+                {
+                    "type": "insights-country",
+                    "country_code": ALL,
+                    "section": ALL,
+                },
+                "n_clicks",
+            ),
+            State("selected_country", "data"),
+            prevent_initial_call=True,
+        )
+        def select_insight(_clicks_country: list[int], current: Any) -> Any:
+            if not ctx.triggered:
+                return no_update
+
+            trigger = ctx.triggered[0]
+
+            if not trigger["value"]:
+                return no_update
+
+            trigger_id = ctx.triggered_id
+
+            if not isinstance(trigger_id, dict):
+                return no_update
+
+            country_code = trigger_id.get("country_code")
+            if not isinstance(country_code, str):
+                return no_update
+
+            if current == country_code:
+                return None
+
+            return country_code
+        
+        @self.app.callback(
+            Output("insights_cache", "data"),
+            Input("model_snapshot", "data"),
+        )
+        def update_insights_data(snapshot: Any) -> Any:
+
+            if not isinstance(snapshot, dict):
+                return {"new": {}, "top": {}}
+
+            now = datetime.now()
+
+            return process_insights(
+                snapshot.get("cache_items", []),
+                self.insights,
+                now,
+            )
+
     def run(self) -> None:
         """Start the Dash server and launch the local UI."""
         host = self.runtime.server_host
@@ -739,9 +855,54 @@ class TapMap:
             debug=self.DASH_DEBUG,
             use_reloader=False,
         )
+    
+    def _load_insights(self) -> None:
+        """Load insights data from JSON file into memory."""
+        try:
+            if not self.insights_path.exists():
+                self.insights = {}
+                return
+
+            data = json.loads(self.insights_path.read_text(encoding="utf-8"))
+
+            insights = data.get("insights")
+            if not isinstance(insights, dict):
+                insights = {}
+
+            for key in ("countries", "providers", "ports", "applications"):
+                insights.setdefault(key, {})
+
+            self.insights = insights
+
+        except Exception as exc:
+            self.logger.warning("Failed to load insights: %s", exc)
+
+    def _maybe_save_insights(self) -> None:
+        """Save insights periodically to limit disk writes."""
+        now = datetime.now().timestamp()
+
+        if now - self._last_insights_save >= 60:
+            self._save_insights()
+            self._last_insights_save = now
+
+    def _save_insights(self) -> None:
+        """Save insights data to JSON file."""
+        try:
+            data = {
+                "insights": self.insights
+            }
+
+            self.insights_path.write_text(
+                json.dumps(data, indent=2),
+                encoding="utf-8",
+            )
+
+        except Exception as exc:
+            self.logger.warning("Failed to save insights: %s", exc)
 
     def close(self) -> None:
         """Close model resources."""
+        self._save_insights()
         close_fn = getattr(self.model.geoinfo, "close", None)
         if callable(close_fn):
             close_fn()

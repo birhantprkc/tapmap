@@ -31,9 +31,12 @@ def render_layout(
         className="app",
         children=[
             dcc.Store(id="menu_open", data=False),
+            dcc.Store(id="insights_on", data=True),
+            dcc.Store(id="selected_country", data=None),
             dcc.Store(id="key_action", data=None),
             dcc.Store(id="status_flash", data=None),
             dcc.Store(id="model_snapshot", data=None),
+            dcc.Store(id="insights_cache", data={"new": {}, "top": {}}),
             dcc.Store(id="ui_cache", data={}),
             dcc.Store(id="status_cache", data=status_cache_store),
             dcc.Store(id="ui_view", data={"points": [], "summaries": {}, "details": {}}),
@@ -80,7 +83,12 @@ def render_layout(
                 id="menu_panel",
                 className=menu_panel_class,
                 children=[
-                    html.Div("Actions", className="mx-panel__title"),
+                    html.Div(
+                        [
+                            _menu_button("Insights (I)", "menu_insights"),
+                        ],
+                        className="mx-menu-group",
+                    ),
                     html.Div(
                         [
                             _menu_button("Show unmapped public services (U)", "menu_unmapped"),
@@ -130,6 +138,11 @@ def render_layout(
                         ],
                     )
                 ],
+            ),
+            html.Div(
+                id="insights_panel",
+                className="insights-panel",
+                children=[],
             ),
             html.Div(
                 id="status_bar",

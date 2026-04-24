@@ -124,7 +124,9 @@ class CacheViewBuilder:
             "country": candidate.get("country"),
             "asn": candidate.get("asn"),
             "asn_org": candidate.get("asn_org"),
-            "first_seen": self._now_text(),
+            "f": self._now_text(),
+            "l": self._now_text(),
+            "m": 0,
             "processes": [],
             "proc_pids": {},
         }
@@ -168,11 +170,19 @@ class CacheViewBuilder:
         points: list[tuple[float, float]] = []
         summaries: dict[str, str] = {}
         details: dict[str, str] = {}
+        point_ips: dict[str, list[str]] = {}
 
         for idx, coord in enumerate(sorted(groups)):
             entries = groups[coord]
             lon, lat = coord
             points.append((lon, lat))
+
+            ips = {
+                e["ip"]
+                for e in entries
+                if isinstance(e, dict) and isinstance(e.get("ip"), str)
+            }
+            point_ips[idx] = list(ips)
 
             place = self._pick_place(entries)
             unique_orgs = self._unique_network_orgs(entries)
@@ -191,7 +201,12 @@ class CacheViewBuilder:
                 unique_orgs=unique_orgs,
             )
 
-        return {"points": points, "summaries": summaries, "details": details}
+        return {
+            "points": points,
+            "summaries": summaries,
+            "details": details,
+            "point_ips": point_ips,
+        }
 
     def _group_by_coord(
         self, cache: dict[str, Any]
