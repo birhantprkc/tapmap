@@ -1,6 +1,6 @@
 [project]
 name = "tapmap"
-version = "1.5.0"
+version = "1.6.0"
 
 [project.scripts]
 tapmap = "tapmap.app:main"
