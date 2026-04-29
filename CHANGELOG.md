@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 1.6.2 (2026-04-29)
+
 ### Insights
 - Include all tied items in Top 5 lists based on 30-day activity
 
