@@ -269,7 +269,7 @@ def test_build_activity_pattern_stable_narrative() -> None:
     # All-Stable apps and countries → core_fraction = 1.0 ≥ STABLE_ACTIVITY_THRESHOLD
     stable_state = {"a": {"m": (1 << 25) - 1}}
     result = build_activity_pattern(stable_state, stable_state, history_days=30)
-    assert "stable" in result.lower()
+    assert "recurring connections" in result.lower()
 
 
 def test_build_activity_pattern_variable_narrative() -> None:
@@ -277,15 +277,15 @@ def test_build_activity_pattern_variable_narrative() -> None:
     # All-Seen-once → core_fraction = 0.0 < VARIABLE_ACTIVITY_THRESHOLD
     transient_state = {"a": {"m": 1}}
     result = build_activity_pattern(transient_state, transient_state, history_days=30)
-    assert "varied" in result.lower()
+    assert "short-lived" in result.lower()
 
 
-def test_build_activity_pattern_mixed_narrative() -> None:
-    """Return the mixed narrative when activity is between the two thresholds."""
-    # All-Stable apps, empty country state → core_fraction = 0.5, in [0.45, 0.70)
+def test_build_activity_pattern_uses_non_empty_dimension_only() -> None:
+    """Use the available dimension when the other has no active entities."""
+    # All-Stable apps, empty country state → core_fraction uses apps only.
     stable_state = {"a": {"m": (1 << 25) - 1}}
     result = build_activity_pattern(stable_state, {}, history_days=30)
-    assert "mix" in result.lower()
+    assert "recurring connections" in result.lower()
 
 
 # --- build_intro_text ---
@@ -327,6 +327,27 @@ def test_build_applications_summary_mostly_transient() -> None:
     counts = {"Stable": 0, "Recurring": 0, "Occasional": 3, "Seen once": 1}
     result = build_applications_summary(4, counts)
     assert "briefly" in result
+
+
+def test_build_applications_summary_no_consistent_phrase_when_no_frequent() -> None:
+    """Do not mention consistent usage when Stable+Recurring is zero."""
+    counts = {"Stable": 0, "Recurring": 0, "Occasional": 2, "Seen once": 3}
+    result = build_applications_summary(5, counts)
+    assert "ran consistently throughout the period" not in result
+
+
+def test_build_applications_summary_no_transient_phrase_when_no_transient() -> None:
+    """Do not mention occasional/brief usage when transient categories are zero."""
+    counts = {"Stable": 2, "Recurring": 1, "Occasional": 0, "Seen once": 0}
+    result = build_applications_summary(3, counts)
+    assert "occasionally or briefly" not in result
+
+
+def test_build_applications_summary_zero_total_has_dedicated_message() -> None:
+    """Use a neutral message when no applications were observed."""
+    counts = {"Stable": 0, "Recurring": 0, "Occasional": 0, "Seen once": 0}
+    result = build_applications_summary(0, counts)
+    assert result == "No applications used the internet during this period."
 
 
 def test_build_applications_summary_mixed() -> None:
@@ -441,7 +462,15 @@ def test_concentration_narrative_high_concentration() -> None:
             cumulative_pcts=[60.0] + [100.0] * 9,
         )
     )
-    assert "small" in result.lower()
+    assert "few providers" in result.lower()
+
+
+def test_concentration_narrative_single_provider_not_broad() -> None:
+    """Avoid broad-range wording when only one provider is present."""
+    result = build_providers_concentration_narrative(
+        ProviderConcentration(total_providers=1, cumulative_pcts=[100.0])
+    )
+    assert "broad" not in result.lower()
 
 
 def test_concentration_narrative_moderate_concentration() -> None:
@@ -453,7 +482,7 @@ def test_concentration_narrative_moderate_concentration() -> None:
             cumulative_pcts=[40.0, 70.0] + [100.0] * 8,
         )
     )
-    assert "established" in result.lower()
+    assert "at least half" in result.lower()
 
 
 def test_concentration_narrative_distributed() -> None:
@@ -465,7 +494,7 @@ def test_concentration_narrative_distributed() -> None:
             cumulative_pcts=[20.0, 35.0, 45.0, 60.0] + [100.0] * 6,
         )
     )
-    assert "broad" in result.lower()
+    assert "many providers" in result.lower()
 
 
 # --- build_countries_summary ---
