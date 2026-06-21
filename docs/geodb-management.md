@@ -21,7 +21,7 @@ On startup, TapMap checks for supported GeoIP databases.
 
 If no supported databases are found, GeoIP Database Management opens automatically and guides you through the installation process.
 
-<img src="images/geodb-install.png" alt="GeoIP Database installation dialog" width="700">
+<img src="../images/geodb-install.png" alt="GeoIP Database installation dialog" width="700">
 
 Users can choose between:
 
@@ -122,7 +122,7 @@ A restart is not normally required.
 
 Open GeoIP Database Management from the Tools menu or press **G**.
 
-<img src="images/geodb-menu.png" alt="GeoIP Database Management menu" width="220">
+<img src="../images/geodb-menu.png" alt="GeoIP Database Management menu" width="220">
 
 GeoIP Database Management can be used to:
 
