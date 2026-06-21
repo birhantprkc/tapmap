@@ -22,7 +22,8 @@ class ModalRoute:
       - full next modal_state dict, or None to close, used when action == "apply"
     """
 
-    action: Literal["apply", "open_data", "noop"]
+    # action: Literal["apply", "open_data", "noop"]
+    action: Literal["apply", "noop"]
     modal_state: dict[str, Any] | None = None
 
 
@@ -30,16 +31,9 @@ def _decide_close(
     *,
     trigger: Any,
     is_open: bool,
-    current_screen: str | None,
     action: Any,
-    is_geo_enabled: bool,
-    missing_geo_screen: str,
 ) -> dict[str, Any] | None:
     """Return None to close the modal, or no decision if not applicable."""
-    # Auto close the missing Geo DB modal once GeoIP is enabled.
-    if is_open and current_screen == missing_geo_screen and is_geo_enabled:
-        return None
-
     if trigger == "btn_close" and is_open:
         return None
 
@@ -61,7 +55,6 @@ def _decide_screen_change(
     now_iso: str,
 ) -> dict[str, Any] | None:
     """Return full modal_state for screen transitions, or None if not applicable."""
-    # Open a modal screen from keyboard action.
     if trigger == "key_action" and isinstance(action, str) and action in menu_screens:
         screen = action
         payload: dict[str, Any] = {}
@@ -72,13 +65,11 @@ def _decide_screen_change(
 
         return {"screen": screen, "t": now_iso, "payload": payload}
 
-    # Update Open Ports payload when the toggle changes.
     if trigger == "toggle_open_ports_system":
         if not is_open or current_screen != "menu_open_ports":
             return None
         return {"screen": "menu_open_ports", "t": now_iso, "payload": {"show_system": show_system}}
 
-    # Open a modal screen from menu click.
     if trigger in menu_screens:
         screen = str(trigger)
         payload: dict[str, Any] = {}
@@ -106,6 +97,27 @@ def _decide_map_click(
 
     return {"screen": "map_click", "t": now_iso, "payload": {"click_data": click_data}}
 
+def _decide_internal_navigation(
+    *,
+    trigger: Any,
+    now_iso: str,
+) -> dict[str, Any] | None:
+    """Return modal_state for internal modal navigation."""
+    if trigger == "btn_view_log":
+        return {
+            "screen": "menu_insights_log",
+            "t": now_iso,
+            "payload": {},
+        }
+
+    if trigger == "btn_log_back":
+        return {
+            "screen": "menu_daily_report",
+            "t": now_iso,
+            "payload": {},
+        }
+
+    return None
 
 def decide_modal_route(
     *,
@@ -117,19 +129,13 @@ def decide_modal_route(
     menu_screens: set[str],
     open_ports_prefs: dict[str, Any] | None,
     click_data: Any,
-    is_geo_enabled: bool,
-    missing_geo_screen: str,
     now_iso: str,
 ) -> ModalRoute:
     """Decide modal routing in a single priority ordered function."""
-    # 1) Close has highest priority (ESC, Close button, auto close).
     close_result = _decide_close(
         trigger=trigger,
         is_open=is_open,
-        current_screen=current_screen,
         action=action,
-        is_geo_enabled=is_geo_enabled,
-        missing_geo_screen=missing_geo_screen,
     )
     if close_result is None:
         return ModalRoute(action="apply", modal_state=None)
@@ -137,7 +143,6 @@ def decide_modal_route(
         # This should never happen, but keeps the contract explicit.
         return ModalRoute(action="noop")
 
-    # 2) Screen routing (menu, keyboard, toggle).
     next_state = _decide_screen_change(
         trigger=trigger,
         is_open=is_open,
@@ -150,12 +155,17 @@ def decide_modal_route(
     )
     if next_state is not None:
         return ModalRoute(action="apply", modal_state=next_state)
+    
+    next_state = _decide_internal_navigation(
+        trigger=trigger,
+        now_iso=now_iso,
+    )
+    if next_state is not None:
+        return ModalRoute(
+            action="apply",
+            modal_state=next_state,
+        )   
 
-    # 3) Side-effect request.
-    if trigger == "btn_open_data":
-        return ModalRoute(action="open_data")
-
-    # 4) Map click.
     next_state = _decide_map_click(
         trigger=trigger,
         click_data=click_data,

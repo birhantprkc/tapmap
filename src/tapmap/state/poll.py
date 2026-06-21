@@ -10,13 +10,12 @@ from dataclasses import dataclass
 from typing import Any
 
 ACTION_GEO_RECHECK = "geo_recheck"
+ACTION_GEO_INSTALL_MAXMIND = "geo_install_maxmind"
+ACTION_GEO_INSTALL_DBIP = "geo_install_dbip"
+ACTION_GEO_UPDATE = "geo_update"
 ACTION_CLEAR_CACHE = "clear_cache"
 ACTION_CACHE_TERMINAL = "cache_terminal"
 ACTION_NORMAL_POLL = "normal_poll"
-
-RECHECK_TRIGGERS = {"menu_recheck_geoip", "btn_check_databases"}
-
-
 @dataclass(frozen=True)
 class PollDecision:
     """Describe which poll action to execute."""
@@ -37,9 +36,6 @@ def decide_poll_action(*, trigger: Any, key_action: Any) -> PollDecision:
 
     Handles direct menu clicks and keyboard actions. Otherwise returns normal_poll.
     """
-    if trigger in RECHECK_TRIGGERS:
-        return PollDecision(action=ACTION_GEO_RECHECK)
-
     if trigger == "menu_clear_cache":
         return PollDecision(action=ACTION_CLEAR_CACHE)
 
@@ -48,8 +44,6 @@ def decide_poll_action(*, trigger: Any, key_action: Any) -> PollDecision:
 
     if trigger == "key_action":
         action = _extract_key_action(key_action)
-        if action == "menu_recheck_geoip":
-            return PollDecision(action=ACTION_GEO_RECHECK)
         if action == "menu_clear_cache":
             return PollDecision(action=ACTION_CLEAR_CACHE)
         if action == "menu_cache_terminal":

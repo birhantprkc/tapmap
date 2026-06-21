@@ -26,15 +26,12 @@ def load_insights(path: Path) -> dict[str, Any]:
         insights = data.get("insights")
         if not isinstance(insights, dict):
             raise ValueError("insights is not a dict")
-        # Normalize: only keep expected keys, fill missing with empty dicts
         normalized = {
             k: dict(insights[k]) if isinstance(insights.get(k), dict) else {}
             for k in expected_keys
         }
-        # Strip unknown keys (ignore extras)
         return normalized
     except Exception:
-        # Safe fallback: empty structure
         return {k: {} for k in ["countries", "providers", "ports", "applications"]}
 
 
@@ -48,8 +45,18 @@ def save_insights(path: Path, data: dict[str, Any]) -> None:
     Raises:
         OSError
     """
-    with path.open("w", encoding="utf-8") as f:
-        json.dump({"insights": data}, f, ensure_ascii=False, indent=2)
+    tmp_path = path.with_suffix(".tmp")
+
+    with tmp_path.open("w", encoding="utf-8") as f:
+        json.dump(
+            {"insights": data},
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+        f.flush()
+
+    tmp_path.replace(path)
 
 
 def build_daily_report(insights: dict[str, Any]) -> DailyReportData:

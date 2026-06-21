@@ -1,8 +1,8 @@
-"""Enrich connection records with GeoIP and ASN data from MaxMind databases.
+"""Enrich connection records with GeoIP and ASN data from MMDB databases.
 
-Expected files in the configured data_dir:
-- GeoLite2-City.mmdb
-- GeoLite2-ASN.mmdb
+Supported files in the configured data_dir:
+- GeoLite2-City.mmdb / GeoLite2-ASN.mmdb
+- DBIP-City.mmdb / DBIP-ASN.mmdb
 
 When database files are missing or cannot be opened, run in best-effort mode and
 return None for unavailable fields.
@@ -57,6 +57,8 @@ class GeoInfo:
 
     CITY_DB_NAME: Final[str] = "GeoLite2-City.mmdb"
     ASN_DB_NAME: Final[str] = "GeoLite2-ASN.mmdb"
+    DBIP_CITY_DB_NAME: Final[str] = "DBIP-City.mmdb"
+    DBIP_ASN_DB_NAME: Final[str] = "DBIP-ASN.mmdb"
 
     def __init__(
         self,
@@ -83,13 +85,8 @@ class GeoInfo:
 
         self._city_reader: maxminddb.Reader | None = None
         self._asn_reader: maxminddb.Reader | None = None
-
-        # Cache: IP string -> GeoResult
         self._ip_cache: OrderedDict[str, GeoResult] = OrderedDict()
-
         self._open_readers()
-
-    # Properties
 
     @property
     def paths(self) -> GeoDbPaths:
@@ -110,8 +107,6 @@ class GeoInfo:
     def asn_enabled(self) -> bool:
         """Return True when the ASN database is open (asn, asn_org)."""
         return self._asn_reader is not None
-
-    # Lifecycle
 
     def reload(self) -> bool:
         """Reopen database readers from disk.
@@ -139,8 +134,6 @@ class GeoInfo:
     def __exit__(self, exc_type, exc, tb) -> None:
         """Close database readers on context exit."""
         self.close()
-
-    # Public API
 
     def enrich(self, connections: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Enrich connection dictionaries in-place using raddr_ip.
@@ -200,23 +193,31 @@ class GeoInfo:
         self._ip_cache_put(ip, result)
         return result
 
-    # Internal helpers
-
     def _open_readers(self) -> None:
         """Open database readers if files exist."""
         self._city_reader = None
         self._asn_reader = None
 
         try:
-            if self._paths.city_db.is_file():
-                self._city_reader = maxminddb.open_database(self._paths.city_db)
+            for city_path in (
+                self._paths.city_db,
+                self._paths.city_db.with_name(self.DBIP_CITY_DB_NAME),
+            ):
+                if city_path.is_file():
+                    self._city_reader = maxminddb.open_database(city_path)
+                    break
         except Exception:
             if not self._silent:
                 raise
 
         try:
-            if self._paths.asn_db.is_file():
-                self._asn_reader = maxminddb.open_database(self._paths.asn_db)
+            for asn_path in (
+                self._paths.asn_db,
+                self._paths.asn_db.with_name(self.DBIP_ASN_DB_NAME),
+            ):
+                if asn_path.is_file():
+                    self._asn_reader = maxminddb.open_database(asn_path)
+                    break
         except Exception:
             if not self._silent:
                 raise
@@ -270,8 +271,6 @@ class GeoInfo:
 
         org = record.get("autonomous_system_organization")
         result["asn_org"] = org if isinstance(org, str) and org else None
-
-    # LRU cache
 
     def _ip_cache_get(self, ip: str) -> GeoResult | None:
         """Return cached value and refresh LRU order."""

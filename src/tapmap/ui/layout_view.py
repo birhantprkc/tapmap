@@ -35,6 +35,7 @@ def render_layout(
             dcc.Store(id="selected_country", data=None),
             dcc.Store(id="key_action", data=None),
             dcc.Store(id="status_flash", data=None),
+            dcc.Store(id="geodb_event", data=None),
             dcc.Store(id="model_snapshot", data=None),
             dcc.Store(id="insights_cache", data={"new": {}, "top": {}}),
             dcc.Store(id="ui_cache", data={}),
@@ -115,18 +116,18 @@ def render_layout(
                     ),
                     html.Details(
                         [
-                            html.Summary("Actions", className="mx-acc-header"),
+                            html.Summary("Tools", className="mx-acc-header"),
                             html.Div(
                                 [
+                                    _menu_button(
+                                        "GeoIP Database Management (G)",
+                                        "menu_geodb_management",
+                                    ),
                                     _menu_button(
                                         "Show cache in terminal (T)",
                                         "menu_cache_terminal",
                                     ),
                                     _menu_button("Clear cache (C)", "menu_clear_cache"),
-                                    _menu_button(
-                                        "Recheck GeoIP databases (R)",
-                                        "menu_recheck_geoip",
-                                    ),
                                 ],
                                 className="mx-acc-body",
                             ),
