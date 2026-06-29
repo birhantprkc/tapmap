@@ -1,5 +1,32 @@
 ## Unreleased
 
+## 1.8.1 (2026-06-29)
+
+### Features
+- Improve map navigation
+  - Add **Fit Connections** (keyboard `Z` and Plotly toolbar button)
+  - Fit the map to all mapped connections
+  - Improve country zoom by fitting the selected country's bounds
+  - Highlight the selected country in the Insights panel
+
+- Add runtime configuration options
+  - Add `TAPMAP_LAUNCH_BROWSER`
+  - Add `TAPMAP_CACHE_RETENTION_MIN`
+
+### Improvements
+- Improve single-instance detection
+  - Validate process identity using PID and process creation time
+  - Automatically replace stale or invalid lock files
+
+### Refactor
+- Rename `country_centers.py` to `country_info.py`
+- Refactor map camera calculations
+
+### Documentation
+- Simplify the README and move detailed guides to the documentation site
+- Update Help for the new map navigation features
+- Add acknowledgements for community contributions
+
 ## 1.8.0 (2026-06-18)
 
 ### Features
