@@ -25,6 +25,7 @@ import argparse
 import contextlib
 import json
 import logging
+import os
 import platform
 import sys
 import threading
@@ -33,7 +34,7 @@ from datetime import datetime
 from typing import Any, ClassVar, Final, Literal, TypedDict
 
 import psutil
-from dash import ALL, Dash, Input, Output, State, ctx, html, no_update
+from dash import ALL, Dash, Input, Output, State, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
 from tapmap import __version__
@@ -57,7 +58,6 @@ from tapmap.state.menu import compute_menu_open_state
 from tapmap.state.modal import decide_modal_route
 from tapmap.state.open_ports_prefs import set_show_system_pref
 from tapmap.state.poll import (
-    ACTION_CACHE_TERMINAL,
     ACTION_CLEAR_CACHE,
     ACTION_NORMAL_POLL,
     ACTION_ZOOM_CONNECTIONS,
@@ -75,6 +75,7 @@ from tapmap.ui.modal_view import ModalTextBuilder
 
 from .app_dirs import open_folder
 from .config import COORD_PRECISION, MY_LOCATION, POLL_INTERVAL_MS, ZOOM_NEAR_KM
+from .logging_config import configure_logging
 from .runtime import AppMeta, RuntimeContext, build_runtime
 
 LonLat = tuple[float, float]
@@ -112,16 +113,14 @@ class TapMap:
             "menu_about",
             "menu_daily_report",
             "menu_insights_log",
+            "menu_exit",
         }
     )
     MENU_COMMANDS: ClassVar[frozenset[str]] = frozenset(
-        {"menu_clear_cache", "menu_cache_terminal"}
+        {"menu_clear_cache", "menu_export_cache"}
     )
 
     DASH_DEBUG = False
-    DEBUG_COORDS = False
-    DEBUG_COORDS_EVERY_N_TICKS = 6
-
     MIN_FLASH_S = 3.0
 
     def __init__(self, runtime_ctx: RuntimeContext) -> None:
@@ -137,10 +136,9 @@ class TapMap:
             suppress_callback_exceptions=True,
         )
 
-        self.ui = MapUI(zoom_near_km=ZOOM_NEAR_KM, debug=self.DEBUG_COORDS)
+        self.ui = MapUI(zoom_near_km=ZOOM_NEAR_KM)
         self.view_builder = CacheViewBuilder(
             coord_precision=COORD_PRECISION,
-            debug=self.DEBUG_COORDS,
             is_docker=self.runtime.is_docker,
             cache_retention_min=self.runtime.cache_retention_min,
         )
@@ -209,13 +207,6 @@ class TapMap:
     def _build_layout(self, start_fig: Any) -> html.Div:
         geo_status = self.geodb.local_status()
         geo_ready = geo_status["provider"] != "none"
-        self.logger.info(
-            "Startup missing-db gate: provider=%s geo_ready=%s open_missing_modal=%s",
-            geo_status.get("provider"),
-            geo_ready,
-            not geo_ready,
-        )
-
         initial_modal_state: dict[str, Any] | None = None
         if not geo_ready:
             initial_modal_state = {
@@ -406,7 +397,7 @@ class TapMap:
         self,
         account_id: Any,
         license_key: Any,
-    ) ->GeoDbResponse:
+    ) -> GeoDbResponse:
         account_id_text, license_key_text = self._resolve_maxmind_install_credentials(
             account_id,
             license_key,
@@ -417,14 +408,8 @@ class TapMap:
                 account_id_text,
                 license_key_text,
             )
-            print("VALIDATE OK")
 
         except ValueError as exc:
-            print("VALIDATE ERROR:", repr(exc))
-
-            if exc.__cause__ is not None:
-                print("CAUSE:", repr(exc.__cause__))
-
             status = self.geodb.local_status()
             status["message"] = str(exc)
             status["error"] = "credentials_invalid"
@@ -436,12 +421,8 @@ class TapMap:
                 license_key_text,
             )
 
-        except Exception as exc:
-            print("KEYRING ERROR:", repr(exc))
-
-            if exc.__cause__ is not None:
-                print("CAUSE:", repr(exc.__cause__))
-
+        except Exception:
+            self.logger.exception("Unable to store MaxMind credentials")
             status = self.geodb.local_status()
             status["message"] = "Unable to store MaxMind credentials"
             status["error"] = "credential_store_failed"
@@ -472,13 +453,6 @@ class TapMap:
         flash = self._flash("Clearing cache...", self.MIN_FLASH_S)
         return snap, empty_cache, status_cache.to_store(), view, flash
 
-    def _handle_cache_terminal(
-        self, status_cache: StatusCache, ui_cache: dict[str, Any]
-    ) -> tuple[Any, Any, Any, Any, Any]:
-        status_cache.show_ui_cache(ui_cache, title="UI CACHE")
-        flash = self._flash("Cache shown in terminal.", self.MIN_FLASH_S)
-        return no_update, no_update, no_update, no_update, flash
-
     def _handle_normal_poll(
         self, tick_n: int, status_cache: StatusCache, ui_cache: dict[str, Any]
     ) -> tuple[Any, Any, Any, Any, Any]:
@@ -501,10 +475,6 @@ class TapMap:
         items_any = snap.get("cache_items")
         items = items_any if isinstance(items_any, list) else []
         status_cache.update(items)
-
-        if self.DEBUG_COORDS and (tick_n % self.DEBUG_COORDS_EVERY_N_TICKS == 0):
-            self.view_builder.debug_coords(updated_cache)
-
         view = self.view_builder.build_view_from_cache(updated_cache)
         self._maybe_save_insights()
 
@@ -625,6 +595,22 @@ class TapMap:
                 self._class_for_modal_screen(screen),
             )
 
+        if screen == "menu_exit":
+            return (
+                [
+                    html.H1("TapMap has stopped"),
+                    html.Div(
+                        id="shutdown_screen",
+                        children=[
+                            html.P("Network monitoring has ended."),
+                            html.P("You may now close this browser tab."),
+                            html.P("Start TapMap to begin monitoring again."),
+                        ],
+                    ),
+                ],
+                "modal-body no-close",
+            )
+
         if screen in self.MENU_SCREENS:
             show_system = bool(payload.get("show_system", False))
             body = self.modal_text.for_action(
@@ -672,7 +658,6 @@ class TapMap:
             Input("tick_model", "n_intervals"),
             Input("key_action", "data"),
             Input("menu_clear_cache", "n_clicks"),
-            Input("menu_cache_terminal", "n_clicks"),
             State("ui_cache", "data"),
             State("status_cache", "data"),
             State("status_flash", "data"),
@@ -682,7 +667,6 @@ class TapMap:
             tick_n: int,
             key_action: Any,
             _clear_clicks: int,
-            _cache_terminal_clicks: int,
             ui_cache_data: Any,
             status_cache_data: Any,
             status_flash_data: Any,
@@ -694,10 +678,6 @@ class TapMap:
                 trigger=trigger,
                 key_action=key_action,
             )
-
-            if decision.action == ACTION_CACHE_TERMINAL:
-                a, b, c, d, flash = self._handle_cache_terminal(status_cache, ui_cache)
-                return a, b, c, d, flash
 
             if decision.action == ACTION_CLEAR_CACHE:
                 snap, cache, sc_store, view, flash = self._handle_clear_cache(status_cache)
@@ -730,11 +710,12 @@ class TapMap:
             Input("menu_open_ports", "n_clicks"),
             Input("menu_unmapped", "n_clicks"),
             Input("menu_lan_local", "n_clicks"),
-            Input("menu_cache_terminal", "n_clicks"),
+            Input("menu_export_cache", "n_clicks"),
             Input("menu_geodb_management", "n_clicks"),
             Input("menu_about", "n_clicks"),
             Input("menu_help", "n_clicks"),
             Input("menu_clear_cache", "n_clicks"),
+            Input("menu_exit", "n_clicks"),
             State("menu_open", "data"),
             State("insights_on", "data"),
             prevent_initial_call=True,
@@ -748,11 +729,12 @@ class TapMap:
             _open_ports: int,
             _unmapped: int,
             _lan_local: int,
-            _cache_terminal: int,
+            _export_cache: int,
             _geodb_management: int,
             _info: int,
             _help: int,
             _clear: int,
+            _exit: int,
             menu_open: Any,
             insights_on: Any,
         ) -> Any:
@@ -878,6 +860,44 @@ class TapMap:
             if not ok:
                 self.logger.warning(message)
 
+        @self.app.callback(
+            Output("cache_download", "data"),
+            Input("menu_export_cache", "n_clicks"),
+            Input("key_action", "data"),
+            State("ui_cache", "data"),
+            State("status_cache", "data"),
+            prevent_initial_call=True,
+        )
+        def export_cache(
+            n_clicks: int | None,
+            key_action: Any,
+            ui_cache_data: Any,
+            status_cache_data: Any,
+        ) -> Any:
+            trigger = ctx.triggered_id
+            if trigger == "key_action":
+                if not (isinstance(key_action, dict) and key_action.get("action") == "menu_export_cache"):
+                    raise PreventUpdate
+            elif not n_clicks:
+                raise PreventUpdate
+            status_cache = StatusCache.from_store(status_cache_data)
+            ui_cache = self._ensure_dict(ui_cache_data)
+            now = datetime.now()
+            filename = f"tapmap-cache-{now.strftime('%Y-%m-%d_%H-%M-%S')}.txt"
+            header = f"TapMap Cache Export\nGenerated: {now.strftime('%Y-%m-%d %H:%M:%S')}"
+            return dcc.send_string(status_cache.format_ui_cache_text(ui_cache, header=header), filename)
+
+        @self.app.callback(
+            Input("key_action", "data"),
+            prevent_initial_call=True,
+        )
+        def exit_app(key_action: Any) -> None:
+            if not (isinstance(key_action, dict) and key_action.get("action") == "exit_confirmed"):
+                raise PreventUpdate
+            self.close()
+            logging.shutdown()
+            os._exit(0)
+
     def _register_modal_render_callbacks(self) -> None:
         @self.app.callback(
             Output("modal_overlay", "className"),
@@ -921,6 +941,7 @@ class TapMap:
             Input("menu_about", "n_clicks"),
             Input("menu_help", "n_clicks"),
             Input("menu_daily_report", "n_clicks"),
+            Input("menu_exit", "n_clicks"),
             Input("btn_close", "n_clicks"),
             Input("toggle_open_ports_system", "value", allow_optional=True),
             Input("map", "clickData"),
@@ -939,6 +960,7 @@ class TapMap:
             _about_clicks: int,
             _help_clicks: int,
             _daily_report_clicks: int,
+            _exit_clicks: int,
             _close_clicks: int,
             toggle_system_value: Any,
             click_data: Any,
@@ -1146,6 +1168,13 @@ class TapMap:
         if self.runtime.launch_browser and not self.runtime.is_docker:
             self._open_browser(url)
 
+        self.logger.info(
+            "Starting %s %s on %s",
+            self.runtime.meta.name,
+            self.runtime.meta.version,
+            url,
+            extra={"section_break": True},
+        )
         self.app.run(
             host=host,
             port=port,
@@ -1162,7 +1191,10 @@ class TapMap:
         try:
             self.insights = load_insights(self.insights_path)
         except Exception as exc:
-            self.logger.warning("Failed to load insights: %s. Starting fresh.", exc)
+            self.logger.warning(
+                "Unable to load insights. Starting with empty history. Reason: %s",
+                exc,
+            )
             self.insights = self._empty_insights()
 
     def _maybe_save_insights(self) -> None:
@@ -1178,7 +1210,10 @@ class TapMap:
         try:
             save_insights(self.insights_path, self.insights)
         except Exception as exc:
-            self.logger.warning("Failed to save insights: %s", exc)
+            self.logger.warning(
+                "Unable to save insights. Changes will not be preserved. Reason: %s",
+                exc,
+            )
 
     def _acquire_lock(self) -> None:
         """Write a lock file, or exit if another instance is already running."""
@@ -1231,6 +1266,7 @@ class TapMap:
 
     def close(self) -> None:
         """Close model resources."""
+        self.logger.info("Shutting down")
         self._save_insights()
         self._release_lock()
         close_fn = getattr(self.model.geoinfo, "close", None)
@@ -1257,14 +1293,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Run application from the command line."""
     _build_arg_parser().parse_args(argv)
-
-    logging.basicConfig(
-        level=logging.DEBUG if TapMap.DEBUG_COORDS else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    logging.getLogger("werkzeug").setLevel(logging.WARNING)
-
     runtime_ctx = build_runtime(APP_META)
+    configure_logging(runtime_ctx)
     app = TapMap(runtime_ctx)
     try:
         app.run()

@@ -8,11 +8,12 @@
         "l",
         "o",
         "g",
-        "t",
+        "e",
         "c",
         "h",
         "a",
         "z",
+        "x",
     ]);
 
     function isTypingTarget(el) {

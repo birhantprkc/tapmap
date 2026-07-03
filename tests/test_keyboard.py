@@ -22,7 +22,7 @@ def test_build_key_action_returns_none_for_empty_value() -> None:
 
 def test_build_key_action_returns_none_for_unknown_token() -> None:
     """Return None when token is not mapped."""
-    assert keyboard.build_key_action("__x__") is None
+    assert keyboard.build_key_action("__q__") is None
 
 
 def test_build_key_action_parses_simple_token(monkeypatch) -> None:
@@ -57,6 +57,18 @@ def test_build_key_action_maps_escape(monkeypatch) -> None:
 
     assert result == {
         "action": "escape",
+        "t": "2026-01-01T00:00:00",
+    }
+
+
+def test_build_key_action_maps_export_cache(monkeypatch) -> None:
+    """Map E token to export cache action."""
+    monkeypatch.setattr(keyboard, "datetime", DummyDatetime)
+
+    result = keyboard.build_key_action("__e__")
+
+    assert result == {
+        "action": "menu_export_cache",
         "t": "2026-01-01T00:00:00",
     }
 
