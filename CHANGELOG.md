@@ -1,5 +1,36 @@
 ## Unreleased
 
+### Features
+
+- Add graceful application shutdown
+  - Add **Exit** (`X`) keyboard shortcut
+  - Add shutdown confirmation dialog
+  - Allow clean application shutdown from the UI
+
+- Add cache export
+  - Replace **Show cache in terminal** with **Export Cache**
+  - Export the current cache snapshot as a timestamped text file
+
+### Improvements
+
+- Improve application branding
+  - Add application icon for packaged Windows executable
+  - Add favicon
+
+- Improve Daily Activity Report wording
+  - Simplify activity summary text
+
+### Refactor
+
+- Improve application logging
+  - Remove temporary diagnostics
+  - Refactor cache export formatting for reuse
+
+### Documentation
+
+- Update README
+- Update Help
+
 ## 1.8.1 (2026-06-29)
 
 ### Features
