@@ -346,13 +346,7 @@ The executable must be built on the target operating system.
 
 ## Project
 
-TapMap is developed by Ola Lie at TIP Teknologi i Praksis AS. Professional services include:
-
-- TapMap support
-- System development
-- Data analysis
-
-[https://tip.no](https://tip.no)
+[TapMap](https://tip.no/tapmap) is developed by Ola Lie at [TIP Teknologi i Praksis AS](https://tip.no).
 
 ---
 
