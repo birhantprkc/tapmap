@@ -12,26 +12,104 @@ permissions:
 
 jobs:
   docker:
-    name: Docker Tests
-    uses: ./.github/workflows/pipeline-docker.yaml
-    with:
-      mode: release
+    name: Validate Docker
+    uses: ./.github/workflows/validate-docker.yaml
 
   linux:
     name: Linux Build
     uses: ./.github/workflows/pipeline-linux.yaml
-    with:
-      mode: release
 
   windows:
     name: Windows Build
     uses: ./.github/workflows/pipeline-windows.yaml
-    with:
-      mode: release
 
-  macos:
-    name: macOS Build
+  macos-arm64:
+    name: macOS (Apple Silicon)
     uses: ./.github/workflows/pipeline-macos.yaml
     with:
-      mode: release
+      architecture: arm64
     secrets: inherit
+
+  macos-x86_64:
+    name: macOS (Intel)
+    uses: ./.github/workflows/pipeline-macos.yaml
+    with:
+      architecture: x86_64
+    secrets: inherit
+
+  publish:
+    name: Publish Release
+    needs:
+      - docker
+      - linux
+      - windows
+      - macos-arm64
+      - macos-x86_64
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Download release assets
+        uses: actions/download-artifact@v8
+        with:
+          pattern: tapmap-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Show downloaded assets
+        shell: bash
+        run: |
+          echo "Directory tree:"
+          ls -lR release-assets
+
+          echo
+          echo "Files:"
+          find release-assets -type f | sort
+
+      - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+
+          echo
+          echo "SHA256 checksums:"
+          cat SHA256SUMS.txt
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: olalie/tapmap
+          tags: |
+            type=raw,value=latest
+            type=ref,event=tag
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          files: release-assets/*

@@ -3,21 +3,23 @@ name: macOS Pipeline
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: Build or release
+      architecture:
+        description: Target architecture
         type: choice
         options:
-          - build
-          - release
-        default: build
+          - arm64
+          - x86_64
+        default: arm64
 
   workflow_call:
     inputs:
-      mode:
-        description: Build or release
-        required: false
+      architecture:
+        description: Target architecture
+        required: true
         type: string
-        default: build
+
+env:
+  TARGET_ARCH: ${{ inputs.architecture }}
 
 jobs:
   build:
@@ -32,12 +34,27 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Select Python interpreter
+        shell: bash
+        run: |
+          if [[ "$TARGET_ARCH" == "x86_64" ]]; then
+            echo "PYTHON=arch -x86_64 python" >> "$GITHUB_ENV"
+          else
+            echo "PYTHON=python" >> "$GITHUB_ENV"
+          fi
+
       - name: Install dependencies
         shell: bash
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-tests.txt
-          pip install pyinstaller
+          echo "Target architecture: $TARGET_ARCH"
+          echo "Using interpreter: $PYTHON"
+
+          $PYTHON --version
+
+          $PYTHON -m pip install --upgrade pip
+          $PYTHON -m pip install -r requirements-tests.txt
+          $PYTHON -m pip install pyinstaller
+
           brew install create-dmg
 
       - name: Import signing certificate
@@ -84,7 +101,10 @@ jobs:
       - name: Build (same as local)
         shell: bash
         run: |
-          python tools/build.py --sign
+          echo "Target architecture: $TARGET_ARCH"
+          echo "Using interpreter: $PYTHON"
+
+          $PYTHON tools/build.py --sign
 
       - name: Show build output
         shell: bash
@@ -94,7 +114,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: tapmap-macos-dmg
-          path: dist/TapMap-*-macos-arm64.dmg
+          name: tapmap-macos-${{ env.TARGET_ARCH }}
+          path: dist/TapMap-*-macos-${{ env.TARGET_ARCH }}.dmg
           if-no-files-found: error
           retention-days: 7
