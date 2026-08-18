@@ -7,18 +7,19 @@ Pipeline
 3. Run automated tests.
 4. Build the application with PyInstaller.
 5. Verify the application build.
-6. Package the application as an Inno Setup installer.
-7. Verify the packaged release.
+6. (Optional) Package the application as an Inno Setup installer.
+7. (Optional) Verify the packaged release.
 
 Implementation
 --------------
-- Entry point: python tools/build.py [--sign]
+- Entry point: python tools/build.py [--package]
 - Application is built as a PyInstaller onedir distribution.
 - The installer is created with Inno Setup (TapMap.iss).
-- Code signing is not yet implemented and will be added when a
-  suitable signing solution is available.
+- Release packages are code signed using SignPath.
+- Packaging requires the SIGNPATH_API_TOKEN environment variable.
 """
 
+from datetime import date
 from pathlib import Path
 
 from build_common import (
@@ -27,12 +28,17 @@ from build_common import (
     PACKAGE_DIR,
     PROJECT_ROOT,
     build_application,
+    powershell,
     project_metadata,
     require_tool,
     rm_tree,
     run,
     run_tests,
 )
+
+WINDOWS_DIR = PROJECT_ROOT / "tools" / "windows"
+VERSION_TEMPLATE = WINDOWS_DIR / "file_version_info.template"
+VERSION_FILE = WINDOWS_DIR / "file_version_info.txt"
 
 
 def clean() -> None:
@@ -47,6 +53,35 @@ def setup() -> None:
     """Prepare the build environment."""
     clean()
     require_tool("iscc")
+
+
+def update_version_info() -> None:
+    """Generate the PyInstaller VERSIONINFO file from the project metadata template."""
+    project = project_metadata()
+    version = project["version"]
+
+    parts = version.split(".")
+    parts.extend(["0"] * (4 - len(parts)))
+    version_tuple = ", ".join(parts[:4])
+
+    current_year = date.today().year
+    copyright_years = "2026" if current_year == 2026 else f"2026-{current_year}"
+
+    legal_copyright = f"© {copyright_years} TIP Teknologi i Praksis AS"
+
+    template = VERSION_TEMPLATE.read_text(encoding="utf-8")
+
+    content = template.format(
+        FILE_VERSION_TUPLE=version_tuple,
+        PRODUCT_VERSION_TUPLE=version_tuple,
+        FILE_VERSION=version,
+        PRODUCT_VERSION=version,
+        LEGAL_COPYRIGHT=legal_copyright,
+    )
+
+    VERSION_FILE.write_text(content, encoding="utf-8")
+
+    print(f"[OK] Generated {VERSION_FILE.name}")
 
 
 def expected_output_file() -> Path:
@@ -64,22 +99,51 @@ def verify_application() -> None:
     print(f"[OK] Verify build ({app.name})")
 
 
+def sign_application() -> None:
+    """Sign the application executable."""
+    ps = powershell()
+    require_tool(ps)
+
+    exe = expected_output_file()
+
+    run(
+        [
+            ps,
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(PROJECT_ROOT / "tools" / "signtool.ps1"),
+            "-File",
+            str(exe),
+        ],
+        capture_output=True,
+    )
+
+    print(f"[OK] Signed application ({exe.name})")
+
+
 def setup_name(version: str) -> str:
     """Return the Windows installer filename."""
     return f"TapMap-{version}-windows-x64-Setup"
 
 
-def package() -> None:
+def package_release() -> None:
     """Create the release package."""
     project = project_metadata()
     version = project["version"]
     output = setup_name(version)
     exe = expected_output_file()
     icon = PROJECT_ROOT / "src" / "tapmap" / "assets" / "tapmap.ico"
+    sign_script = PROJECT_ROOT / "tools" / "signtool.ps1"
+
+    ps = powershell()
+    require_tool(ps)
+    require_tool("iscc")
 
     run(
         [
             "iscc",
+            f"/Ssigntool={ps} -ExecutionPolicy Bypass -File $q{sign_script}$q $f",
             f"/DMyAppVersion={version}",
             f"/DMyAppExePath={exe}",
             f"/DMySetupIcon={icon}",
@@ -90,8 +154,10 @@ def package() -> None:
         capture_output=True,
     )
 
+    print(f"[OK] Package release ({output}.exe)")
 
-def verify_package(sign: bool = False) -> None:
+
+def verify_package() -> None:
     """Verify the release package."""
     project = project_metadata()
     package = DIST_DIR / f"{setup_name(project['version'])}.exe"
@@ -102,13 +168,14 @@ def verify_package(sign: bool = False) -> None:
     print(f"[OK] Verified package ({package.name})")
 
 
-def pipeline(sign: bool = False) -> None:
-    """Build the release package."""
+def pipeline(package: bool = False) -> None:
+    """Build the Windows application and installer."""
     setup()
     run_tests()
+    update_version_info()
     build_application()
-    # TODO: Add code signing once a signing solution is available.
     verify_application()
-    package()
-    # TODO: Add code signing once a signing solution is available.
-    verify_package()
+    if package:
+        sign_application()
+        package_release()
+        verify_package()

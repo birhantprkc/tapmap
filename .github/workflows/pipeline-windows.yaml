@@ -2,8 +2,17 @@ name: Windows Pipeline
 
 on:
   workflow_dispatch:
+    inputs:
+      package:
+        description: "Create a release package"
+        type: boolean
+        default: false
 
   workflow_call:
+    inputs:
+      package:
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -25,20 +34,29 @@ jobs:
           pip install -r requirements-tests.txt
           pip install pyinstaller
 
-      - name: Build (same as local)
+      - name: Build
         shell: pwsh
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
         run: |
-          python tools/build.py
+          if ("${{ inputs.package }}" -eq "true") {
+            python tools/build.py --package
+          }
+          else {
+            python tools/build.py
+          }
 
       - name: Show build output
         shell: pwsh
         run: |
           Get-ChildItem dist
 
-      - name: Upload artifact
+      - name: Upload installer
+        if: inputs.package
         uses: actions/upload-artifact@v7
         with:
           name: tapmap-windows-setup
           path: dist/TapMap-*-windows-x64-Setup.exe
+          archive: false
           if-no-files-found: error
           retention-days: 7

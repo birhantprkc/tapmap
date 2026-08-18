@@ -18,16 +18,21 @@ jobs:
   linux:
     name: Linux Build
     uses: ./.github/workflows/pipeline-linux.yaml
+    with:
+      package: true
 
   windows:
     name: Windows Build
     uses: ./.github/workflows/pipeline-windows.yaml
+    with:
+      package: true
 
   macos-arm64:
     name: macOS (Apple Silicon)
     uses: ./.github/workflows/pipeline-macos.yaml
     with:
       architecture: arm64
+      package: true
     secrets: inherit
 
   macos-x86_64:
@@ -35,6 +40,7 @@ jobs:
     uses: ./.github/workflows/pipeline-macos.yaml
     with:
       architecture: x86_64
+      package: true
     secrets: inherit
 
   publish:
