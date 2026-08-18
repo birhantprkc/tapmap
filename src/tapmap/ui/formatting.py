@@ -6,7 +6,10 @@ values in the TapMap interface.
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+_CAMEL_CASE_BOUNDARY = re.compile(r"(?<!^)(?=[A-Z])")
 
 
 def safe_str(value: Any) -> str:
@@ -60,3 +63,75 @@ def pretty_bind_ip(ip: str) -> str:
     if ip == "::":
         return "ALL (IPv6)"
     return ip
+
+
+def country_flag(code: str | None) -> str:
+    """Return a flag emoji for a two-letter ISO country code, or a globe fallback."""
+    if not isinstance(code, str) or len(code) != 2:
+        return "🌐"
+    code = code.upper()
+    return chr(127397 + ord(code[0])) + chr(127397 + ord(code[1]))
+
+# Display-only; never stored in ApplicationMetadata/ui_cache (those use None).
+PENDING_VERIFICATION_STATUS = "pending"
+
+_VERIFICATION_STATUS_COLORS = {
+    "verified": "#00ff66",
+    "failed": "#ff4444",
+    PENDING_VERIFICATION_STATUS: "#ffffff",
+}
+_UNKNOWN_VERIFICATION_STATUS_COLOR = "#ffff00"
+
+
+def verification_status_color(verification_status: str | None) -> str:
+    """Return the semantic color for an app_verification_status value.
+
+    Accepts "verified", "failed", "pending", "unknown", or None; any other
+    value maps to the unknown color (yellow).
+    """
+    return _VERIFICATION_STATUS_COLORS.get(verification_status, _UNKNOWN_VERIFICATION_STATUS_COLOR)
+
+
+def verification_status_glyph(verification_status: str | None) -> str:
+    """Return a colored bullet glyph for an app_verification_status value."""
+    return f'<span style="color:{verification_status_color(verification_status)}">■</span>'
+
+
+def elide_path_middle(path: str, max_length: int = 60) -> str:
+    r"""Shorten a filesystem path for display by collapsing middle directory components.
+
+    Returns path unchanged if its length is already within max_length, or if
+    it has no directory components to drop (e.g. "C:\file.exe"). Otherwise
+    keeps the drive/root, the first one or two directory levels, and the
+    filename, replacing the rest with a single "..." component. Always
+    truncates on whole path-separator components, never mid-component.
+    """
+    if not path or len(path) <= max_length:
+        return path
+
+    sep = "\\" if "\\" in path else "/"
+    parts = [p for p in path.split(sep) if p]
+
+    if len(parts) < 3:
+        return path
+
+    root = parts[0]
+    filename = parts[-1]
+    middle = parts[1:-1]
+
+    keep = min(2, len(middle))
+    if keep >= len(middle):
+        return path
+
+    return sep.join([root, *middle[:keep], "...", filename])
+
+
+def humanize_camel_case(text: str) -> str:
+    """Convert PascalCase/camelCase text into normal, space-separated words.
+
+    Only the first word keeps its original casing; the rest are lowercased.
+    """
+    words = _CAMEL_CASE_BOUNDARY.sub(" ", text).split()
+    if not words:
+        return text
+    return " ".join([words[0], *(w.lower() for w in words[1:])])

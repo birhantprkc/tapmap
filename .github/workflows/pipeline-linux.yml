@@ -1,22 +1,25 @@
-name: Windows Pipeline
+name: Linux Pipeline
 
 on:
   workflow_dispatch:
     inputs:
       package:
-        description: "Create a release package"
+        description: Build Debian package
+        required: false
         type: boolean
         default: false
 
   workflow_call:
     inputs:
       package:
+        description: Build Debian package
+        required: false
         type: boolean
         default: false
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
@@ -28,35 +31,35 @@ jobs:
           python-version: "3.13"
 
       - name: Install dependencies
-        shell: pwsh
+        shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-tests.txt
-          pip install pyinstaller
+          pip install -r requirements-build.txt
 
-      - name: Build
-        shell: pwsh
-        env:
-          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          sudo apt-get update
+          sudo apt-get install -y \
+            dpkg-dev \
+            desktop-file-utils
+
+      - name: Build (same as local)
+        shell: bash
         run: |
-          if ("${{ inputs.package }}" -eq "true") {
+          if [ "${{ inputs.package }}" = "true" ]; then
             python tools/build.py --package
-          }
-          else {
+          else
             python tools/build.py
-          }
+          fi
 
       - name: Show build output
-        shell: pwsh
+        shell: bash
         run: |
-          Get-ChildItem dist
+          find dist -maxdepth 2
 
-      - name: Upload installer
+      - name: Upload Debian package
         if: inputs.package
         uses: actions/upload-artifact@v7
         with:
-          name: tapmap-windows-setup
-          path: dist/TapMap-*-windows-x64-Setup.exe
-          archive: false
+          name: tapmap-linux-deb
+          path: dist/TapMap-*-linux-amd64.deb
           if-no-files-found: error
           retention-days: 7

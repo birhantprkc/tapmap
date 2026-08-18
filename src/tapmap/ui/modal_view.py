@@ -6,6 +6,7 @@ and modal screens shown by the application.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -22,6 +23,11 @@ from .formatting import (
 )
 from .help_view import render_help
 from .tables import ColumnSpec, build_table, cell
+
+_EMBEDDED_MARKUP_RE = re.compile(
+    r'<span style="color:(?P<color>#[0-9a-fA-F]{6})">(?P<glyph>.*?)</span>'
+    r'|<exe full="(?P<exe_path>[^"]*)">(?P<exe_text>.*?)</exe>'
+)
 
 
 class ModalTextBuilder:
@@ -89,12 +95,13 @@ class ModalTextBuilder:
         label = self._label_map.get(action, action)
         return [self._h1("Details"), html.Pre(f"Menu selected: {label}")]
 
-    def for_click(self, click_data: Any, ui_view: Any) -> html.Pre | None:
+    def for_click(self, click_data: Any, ui_view: Any, *, is_docker: bool) -> html.Pre | None:
         """Build click detail content from Plotly clickData.
 
         Args:
             click_data: Plotly clickData payload.
             ui_view: Dash store content with the "details" mapping.
+            is_docker: Whether the application is running in Docker.
 
         Returns:
             html.Pre for a valid click, otherwise None.
@@ -119,15 +126,55 @@ class ModalTextBuilder:
         details_map = details if isinstance(details, dict) else {}
 
         detail = details_map.get(str(idx), f"Location {idx}")
-        lon = point0.get("lon")
-        lat = point0.get("lat")
-
-        body_text = f"lon={lon}  lat={lat}\n\n{detail}"
-        return html.Pre(body_text)
+        return html.Pre(self._render_embedded_markup(detail, is_docker=is_docker))
 
     @staticmethod
     def _h1(title: str) -> html.H1:
         return html.H1(title)
+
+    @staticmethod
+    def _render_embedded_markup(text: str, *, is_docker: bool) -> list[Any]:
+        """Split text on embedded cache-view markup into real Dash components.
+
+        Detail strings from the cache view carry inline color markup
+        ('<span style="color:...">text</span>'), used for both the
+        verification-status-color bullet and the verification status text, and, in the Technical
+        Details view, click-to-reveal executable paths
+        ('<exe full="...">display</exe>'). html.Pre renders string children as
+        plain text, so this markup is rendered as real components - carrying a
+        native tooltip and a click target for the executable case - instead of
+        literal tag text. In Docker there is no file manager to reveal an
+        executable in, so exe markup renders as plain text instead.
+        """
+        parts: list[Any] = []
+        pos = 0
+        exe_index = 0
+
+        for m in _EMBEDDED_MARKUP_RE.finditer(text):
+            if m.start() > pos:
+                parts.append(text[pos : m.start()])
+
+            if m.group("color") is not None:
+                parts.append(html.Span(m.group("glyph"), style={"color": m.group("color")}))
+            elif is_docker:
+                parts.append(m.group("exe_text"))
+            else:
+                exe_path = m.group("exe_path")
+                parts.append(
+                    html.Span(
+                        m.group("exe_text"),
+                        title=exe_path,
+                        className="mx-exe-link",
+                        id={"type": "reveal-exe", "path": exe_path, "idx": exe_index},
+                        n_clicks=0,
+                    )
+                )
+                exe_index += 1
+
+            pos = m.end()
+
+        parts.append(text[pos:])
+        return parts
 
     @classmethod
     def _open_ports_sort_key(cls, row: dict[str, Any]) -> tuple[int, int, int, str, int]:
