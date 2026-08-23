@@ -55,8 +55,14 @@ from tapmap.model.model import Model
 from tapmap.model.netinfo import NetInfo
 from tapmap.model.public_ip import iter_public_ip_candidates
 from tapmap.settings_persistence import Settings, load_settings, save_settings
-from tapmap.state.insights import process_insights
+from tapmap.significant_connections_persistence import (
+    load_significant_connections,
+    save_significant_connections,
+)
+from tapmap.state.connection_analyzer import ConnectionAnalyzer
+from tapmap.state.connection_state import ConnectionState
 from tapmap.state.insights_log import write_insights_log
+from tapmap.state.insights_state import CURRENT_SCHEMA_VERSION, InsightsState
 from tapmap.state.keyboard import build_key_action
 from tapmap.state.menu import compute_menu_open_state
 from tapmap.state.modal import decide_modal_route
@@ -69,6 +75,8 @@ from tapmap.state.poll import (
     PollDecision,
     decide_poll_action,
 )
+from tapmap.state.significance import SignificanceHistory
+from tapmap.state.significant_connections import SignificantConnections
 from tapmap.state.status_cache import StatusCache
 from tapmap.state.status_line import render_status_text
 from tapmap.ui.cache_view import CacheViewBuilder
@@ -146,9 +154,10 @@ class TapMap:
         self.view_builder = CacheViewBuilder(
             coord_precision=COORD_PRECISION,
             is_docker=self.runtime.is_docker,
-            cache_retention_min=self.runtime.cache_retention_min,
         )
-        self._ui_cache: dict[str, Any] = {}
+        self.connection_state = ConnectionState(
+            cache_retention_min=self.runtime.cache_retention_min
+        )
         self._status_cache = StatusCache()
         # Technical details setting the current ui_view was built with, so a
         # setting change can trigger an immediate rebuild instead of waiting for
@@ -185,18 +194,23 @@ class TapMap:
             ],
         }
 
-        self.insights: dict[str, Any] = {
-            "countries": {},
-            "providers": {},
-            "ports": {},
-
-
-            "applications": {},
-        }
-
         self.insights_path = self.runtime.app_data_dir / "insights.json"
-        self._load_insights()
-        self._last_insights_save = 0.0
+        self.significant_connections_path = (
+            self.runtime.app_data_dir / "significant_connections.json"
+        )
+        self._load_history()
+        self._last_history_save = 0.0
+
+        # Constructed after _load_history() so SignificanceHistory derives from
+        # the loaded InsightsState, and ConnectionAnalyzer references the
+        # already-loaded SignificantConnections.
+        self.significance_history = SignificanceHistory.from_insights_state(self.insights_state)
+        self.connection_analyzer = ConnectionAnalyzer(
+            self.connection_state,
+            self.insights_state.insights,
+            self.significant_connections,
+            self.significance_history,
+        )
 
         self.settings_path = self.runtime.app_data_dir / "settings.json"
         self.settings: Settings = load_settings(self.settings_path)
@@ -465,50 +479,54 @@ class TapMap:
     ) -> tuple[Any, Any, Any, Any, Any]:
         """Reset the runtime cache without observing the monitored system."""
         status_cache.clear()
-        empty_cache: dict[str, Any] = {}
-        view = self.view_builder.build_view_from_cache(empty_cache, technical_details_enabled)
+        cache = self.connection_state.clear()
+        view = self.view_builder.build_view_from_cache(cache, technical_details_enabled)
         flash = self._flash("Clearing cache...", self.MIN_FLASH_S)
-        return no_update, empty_cache, status_cache.to_store(), view, flash
+        return no_update, status_cache.to_store(), view, flash, no_update
 
     def _handle_normal_poll(
         self,
         tick_n: int,
         status_cache: StatusCache,
-        ui_cache: dict[str, Any],
         technical_details_enabled: bool,
     ) -> tuple[Any, Any, Any, Any, Any]:
         snap = self.model.snapshot()
         if not isinstance(snap, dict):
-            view = self.view_builder.build_view_from_cache(ui_cache, technical_details_enabled)
+            view = self.view_builder.build_view_from_cache(
+                self.connection_state.cache, technical_details_enabled
+            )
             flash = self._flash("Model snapshot is invalid. See terminal.", self.MIN_FLASH_S)
-            return {"error": True}, ui_cache, status_cache.to_store(), view, flash
+            return {"error": True}, status_cache.to_store(), view, flash, no_update
 
         snap["runtime_info"] = self._build_runtime_info()
 
         if snap.get("error"):
-            view = self.view_builder.build_view_from_cache(ui_cache, technical_details_enabled)
-            return snap, ui_cache, status_cache.to_store(), view, no_update
-
-        candidates_any = snap.get("map_candidates")
-        candidates = candidates_any if isinstance(candidates_any, list) else []
-        updated_cache = self.view_builder.merge_map_candidates(ui_cache, candidates)
-        self._refresh_pending_app_verifications(updated_cache)
+            view = self.view_builder.build_view_from_cache(
+                self.connection_state.cache, technical_details_enabled
+            )
+            return snap, status_cache.to_store(), view, no_update, no_update
 
         items_any = snap.get("cache_items")
         items = items_any if isinstance(items_any, list) else []
+
+        insights_data = self.connection_analyzer.analyze(items)
+        self._refresh_pending_app_verifications()
+
         status_cache.update(items)
-        view = self.view_builder.build_view_from_cache(updated_cache, technical_details_enabled)
-        self._maybe_save_insights()
+        view = self.view_builder.build_view_from_cache(
+            self.connection_state.cache, technical_details_enabled
+        )
+        self._maybe_save_history()
 
-        return snap, updated_cache, status_cache.to_store(), view, no_update
+        return snap, status_cache.to_store(), view, no_update, insights_data
 
-    def _refresh_pending_app_verifications(self, ui_cache: dict[str, Any]) -> None:
+    def _refresh_pending_app_verifications(self) -> None:
         """Backfill AppInfo verification results that completed since the last poll.
 
-        Covers ui_cache entries whose connection has left the current
-        snapshot but are still retained. Never triggers new AppInfo work.
+        Covers connection-state entries whose connection has left the
+        current snapshot but are still retained. Never triggers new AppInfo work.
         """
-        pending = self.view_builder.pending_exe_paths(ui_cache)
+        pending = self.connection_state.pending_exe_paths()
         if not pending:
             return
 
@@ -529,7 +547,7 @@ class TapMap:
             }
             for exe, metadata in resolved.items()
         }
-        self.view_builder.refresh_resolved_applications(ui_cache, fields)
+        self.connection_state.refresh_resolved_applications(fields)
 
     def _open_browser(self, url: str, delay_s: float = 0.8) -> None:
         try:
@@ -629,7 +647,7 @@ class TapMap:
             return self._as_children(body), "modal-body"
 
         if screen == "menu_daily_report":
-            report = persist_build_daily_report(self.insights)
+            report = persist_build_daily_report(self.insights_state.insights)
             return (
                 render_daily_activity_report(report),
                 self._class_for_modal_screen(screen),
@@ -639,7 +657,7 @@ class TapMap:
             log_path = self.insights_path.with_suffix(".log")
             text = ""
             with contextlib.suppress(Exception):
-                write_insights_log(self.insights, log_path)
+                write_insights_log(self.insights_state.insights, log_path)
                 text = log_path.read_text(encoding="utf-8")
             return (
                 render_insights_log(text),
@@ -705,6 +723,7 @@ class TapMap:
             Output("status_cache", "data"),
             Output("ui_view", "data"),
             Output("status_flash", "data"),
+            Output("insights_cache", "data"),
             Input("tick_model", "n_intervals"),
             Input("key_action", "data"),
             Input("menu_clear_cache", "n_clicks"),
@@ -722,7 +741,6 @@ class TapMap:
             model_snapshot_data: Any,
         ):
             status_cache = self._status_cache
-            ui_cache = self._ui_cache
             technical_details_enabled = bool(technical_details_data)
             trigger = ctx.triggered_id
             decision = decide_poll_action(
@@ -746,36 +764,34 @@ class TapMap:
                 decision = PollDecision(action=ACTION_REBUILD_VIEW)
 
             if decision.action == ACTION_CLEAR_CACHE:
-                snap, cache, sc_store, view, flash = self._handle_clear_cache(
+                snap, sc_store, view, flash, insights_data = self._handle_clear_cache(
                     status_cache, technical_details_enabled
                 )
-                self._ui_cache = cache
                 self._last_built_technical_details = technical_details_enabled
-                return snap, sc_store, view, flash
+                return snap, sc_store, view, flash, insights_data
 
             if decision.action == ACTION_NORMAL_POLL:
-                snap, cache, sc_store, view, _flash = self._handle_normal_poll(
-                    tick_n, status_cache, ui_cache, technical_details_enabled
+                snap, sc_store, view, _flash, insights_data = self._handle_normal_poll(
+                    tick_n, status_cache, technical_details_enabled
                 )
-                self._ui_cache = cache
                 self._last_built_technical_details = technical_details_enabled
 
                 now = datetime.now().timestamp()
                 if isinstance(status_flash_data, dict):
                     until = status_flash_data.get("until")
                     if isinstance(until, (int, float)) and now < until:
-                        return snap, sc_store, view, no_update
+                        return snap, sc_store, view, no_update, insights_data
 
-                return snap, sc_store, view, None
+                return snap, sc_store, view, None, insights_data
 
             if decision.action == ACTION_REBUILD_VIEW:
                 view = self.view_builder.build_view_from_cache(
-                    self._ui_cache, technical_details_enabled
+                    self.connection_state.cache, technical_details_enabled
                 )
                 self._last_built_technical_details = technical_details_enabled
-                return no_update, no_update, view, no_update
+                return no_update, no_update, view, no_update, no_update
 
-            return no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update
 
     def _register_menu_callbacks(self) -> None:
         @self.app.callback(
@@ -1018,7 +1034,10 @@ class TapMap:
             filename = f"tapmap-cache-{now.strftime('%Y-%m-%d_%H-%M-%S')}.txt"
             header = f"TapMap Cache Export\nGenerated: {now.strftime('%Y-%m-%d %H:%M:%S')}"
             return dcc.send_string(
-                self._status_cache.format_ui_cache_text(self._ui_cache, header=header), filename
+                self._status_cache.format_ui_cache_text(
+                    self.connection_state.cache, header=header
+                ),
+                filename,
             )
 
         @self.app.callback(
@@ -1277,23 +1296,6 @@ class TapMap:
 
             return render_insights_panel(data, selected_country=selected_country)
 
-        @self.app.callback(
-            Output("insights_cache", "data"),
-            Input("model_snapshot", "data"),
-        )
-        def update_insights_data(snapshot: Any) -> Any:
-
-            if not isinstance(snapshot, dict):
-                return {"new": {}, "top": {}}
-
-            now = datetime.now()
-
-            return process_insights(
-                snapshot.get("cache_items", []),
-                self.insights,
-                now,
-            )
-
     def run(self) -> None:
         """Start the Dash server and launch the local UI."""
         host = self.runtime.server_host
@@ -1320,24 +1322,40 @@ class TapMap:
     def _empty_insights() -> dict[str, Any]:
         return {"countries": {}, "providers": {}, "ports": {}, "applications": {}}
 
-    def _load_insights(self) -> None:
-        """Load insights data from JSON file into memory (delegated)."""
+    def _load_history(self) -> None:
+        """Load Insights and Significant Connections history from disk (delegated)."""
         try:
-            self.insights = load_insights(self.insights_path)
+            self.insights_state = load_insights(self.insights_path)
         except Exception as exc:
             self.logger.warning(
                 "Unable to load insights. Starting with empty history. Reason: %s",
                 exc,
             )
-            self.insights = self._empty_insights()
+            self.insights_state = InsightsState(
+                version=CURRENT_SCHEMA_VERSION,
+                insights=self._empty_insights(),
+                verification_failed={},
+            )
 
-    def _maybe_save_insights(self) -> None:
-        """Save insights periodically to limit disk writes."""
+        try:
+            significant_connections_items = load_significant_connections(
+                self.significant_connections_path
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Unable to load Significant Connections history. Starting empty. Reason: %s",
+                exc,
+            )
+            significant_connections_items = []
+        self.significant_connections = SignificantConnections(significant_connections_items)
+
+    def _maybe_save_history(self) -> None:
+        """Save Insights and Significant Connections history periodically to limit disk writes."""
         now = datetime.now().timestamp()
 
-        if now - self._last_insights_save >= 60:
-            self._last_insights_save = now
-            self._save_insights()
+        if now - self._last_history_save >= 60:
+            self._last_history_save = now
+            self._save_history()
 
     def _save_settings(self) -> None:
         """Write settings data to disk atomically."""
@@ -1349,13 +1367,28 @@ class TapMap:
                 exc,
             )
 
-    def _save_insights(self) -> None:
-        """Write insights data to disk atomically (delegated)."""
+    def _save_history(self) -> None:
+        """Write Insights and Significant Connections history to disk atomically (delegated).
+
+        Each file's save failure is isolated so one failing write does not
+        prevent the other from being persisted.
+        """
         try:
-            save_insights(self.insights_path, self.insights)
+            save_insights(self.insights_path, self.insights_state)
         except Exception as exc:
             self.logger.warning(
                 "Unable to save insights. Changes will not be preserved. Reason: %s",
+                exc,
+            )
+
+        try:
+            save_significant_connections(
+                self.significant_connections_path, self.significant_connections.items
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Unable to save Significant Connections history. Changes will not be preserved."
+                " Reason: %s",
                 exc,
             )
 
@@ -1411,7 +1444,7 @@ class TapMap:
     def close(self) -> None:
         """Close model resources."""
         self.logger.info("Shutting down")
-        self._save_insights()
+        self._save_history()
         self._release_lock()
         close_fn = getattr(self.model.geoinfo, "close", None)
         if callable(close_fn):
