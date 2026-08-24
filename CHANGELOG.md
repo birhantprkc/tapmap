@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 1.10.0 (2026-08-24)
+
 ### Features
 
 - Add cross-platform application information
@@ -17,6 +19,8 @@
   - Show application identity information immediately
   - Cache and reuse completed verification results
   - Show **Retrieving...** while verification is pending
+
+- Refactor connection and unmapped state handling to support future features
 
 ### Packaging
 
