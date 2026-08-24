@@ -1,5 +1,11 @@
 ## Unreleased
 
+## 1.10.1 (2026-08-24)
+
+### Packaging
+
+- Fix Windows installer inclusion in GitHub Release assets
+
 ## 1.10.0 (2026-08-24)
 
 ### Features
