@@ -1,4 +1,4 @@
-"""Cache view preparation helpers for the TapMap UI.
+"""Service point view preparation helpers for the TapMap UI.
 
 Build map points, hover summaries, and click details from the
 accumulated per-service cache owned by ConnectionState.
@@ -6,31 +6,25 @@ accumulated per-service cache owned by ConnectionState.
 
 from __future__ import annotations
 
-import logging
 from collections import Counter, defaultdict
 from typing import Any
 
-from ..state.connection_state import UNKNOWN_APP_KEY
+from ..state.service_entries import UNKNOWN_APP_KEY
 from .formatting import (
     PENDING_VERIFICATION_STATUS,
     country_flag,
+    display_verification_status,
     elide_path_middle,
     humanize_camel_case,
     safe_str,
     verification_status_color,
     verification_status_glyph,
+    verification_status_priority,
 )
 
-_APP_VERIFICATION_STATUS_PRIORITY: dict[str | None, int] = {
-    "failed": 0,
-    "unknown": 1,
-    PENDING_VERIFICATION_STATUS: 2,
-    "verified": 3,
-}
 
-
-class CacheViewBuilder:
-    """Build UI cache and map view data."""
+class ServicePointViewBuilder:
+    """Build map view data grouped into ServicePoints."""
 
     _UNKNOWN_APP_KEY = UNKNOWN_APP_KEY
 
@@ -41,7 +35,6 @@ class CacheViewBuilder:
     ) -> None:
         self.coord_precision = int(coord_precision)
         self.is_docker = bool(is_docker)
-        self.logger = logging.getLogger(__name__)
 
     @staticmethod
     def _fmt_ip_port(ip: str, port: int) -> str:
@@ -77,19 +70,18 @@ class CacheViewBuilder:
         return f"{shown} +{len(cleaned) - max_items}"
 
     def build_view_from_cache(
-        self, ui_cache: dict[str, Any], technical_details_enabled: bool
+        self, cache: dict[str, Any], technical_details_enabled: bool
     ) -> dict[str, Any]:
         """Group cached entries by rounded coordinates and build map view data.
 
         Args:
-            ui_cache: Per-service cache from ConnectionState.merge/clear.
+            cache: Per-service cache from ConnectionState.merge/clear.
             technical_details_enabled: When True, hover summaries use the
                 connection-oriented format. When False, hover summaries use
                 the application-oriented format. Click details are
                 unaffected either way.
         """
-        cache = ui_cache if isinstance(ui_cache, dict) else {}
-        groups = self._group_by_coord(cache)
+        groups = self._group_by_coord(cache if isinstance(cache, dict) else {})
 
         points: list[tuple[float, float]] = []
         summaries: dict[str, str] = {}
@@ -217,19 +209,6 @@ class CacheViewBuilder:
         return Counter(codes).most_common(1)[0][0] if codes else None
 
     @staticmethod
-    def _display_verification_status(app: dict[str, Any]) -> str | None:
-        """Return app_verification_status for display, substituting the pending sentinel.
-
-        Only substitutes for a real application (exe is not None) - the
-        synthetic unknown-application bucket has no pending work and must
-        keep showing "unknown".
-        """
-        status = app.get("app_verification_status")
-        if status is None and app.get("exe") is not None:
-            return PENDING_VERIFICATION_STATUS
-        return status
-
-    @staticmethod
     def _pick_representative_app(
         entries: list[dict[str, Any]],
     ) -> tuple[str, str | None, list[dict[str, Any]], int]:
@@ -256,9 +235,7 @@ class CacheViewBuilder:
                     continue
                 name = app.get("app_name")
                 key = name if isinstance(name, str) and name.strip() else None
-                verification_status_by_key.setdefault(
-                    key, CacheViewBuilder._display_verification_status(app)
-                )
+                verification_status_by_key.setdefault(key, display_verification_status(app))
                 if key in seen_keys:
                     continue
                 seen_keys.add(key)
@@ -272,7 +249,7 @@ class CacheViewBuilder:
             verification_status = verification_status_by_key.get(key)
             display = key or "Unknown"
             return (
-                _APP_VERIFICATION_STATUS_PRIORITY.get(verification_status, 1),
+                verification_status_priority(verification_status),
                 -len(group_entries),
                 display.lower(),
             )
@@ -325,7 +302,7 @@ class CacheViewBuilder:
                 continue
             lines = [f"Network operator: {org}"]
             for app in apps:
-                bullet = verification_status_glyph(self._display_verification_status(app))
+                bullet = verification_status_glyph(display_verification_status(app))
                 lines.append(f"    {bullet} {self._format_app_line(app)}")
             org_blocks.append("\n".join(lines))
 
@@ -343,9 +320,9 @@ class CacheViewBuilder:
                     by_exe.setdefault(exe_key, app)
 
         def sort_key(app: dict[str, Any]) -> tuple[int, str]:
-            verification_status = CacheViewBuilder._display_verification_status(app)
+            verification_status = display_verification_status(app)
             name = app.get("app_name") or "Unknown application"
-            return (_APP_VERIFICATION_STATUS_PRIORITY.get(verification_status, 1), name.lower())
+            return (verification_status_priority(verification_status), name.lower())
 
         ordered = sorted(by_exe.values(), key=sort_key)
 
@@ -370,7 +347,7 @@ class CacheViewBuilder:
 
     def _format_app_line(self, app: dict[str, Any]) -> str:
         name = app.get("app_name") or "Unknown application"
-        display_status = self._display_verification_status(app)
+        display_status = display_verification_status(app)
         if display_status == PENDING_VERIFICATION_STATUS:
             creator = "Retrieving..."
         else:
@@ -388,7 +365,7 @@ class CacheViewBuilder:
         Uses the platform-specific signature state (humanized) and details
         when available. Falls back to the raw verification status otherwise.
         """
-        display_status = CacheViewBuilder._display_verification_status(app)
+        display_status = display_verification_status(app)
         if display_status == PENDING_VERIFICATION_STATUS:
             return "Retrieving..."
 
@@ -638,38 +615,3 @@ class CacheViewBuilder:
 
         return ", ".join(parts)
 
-    def _format_procs_with_pids(self, entry: dict[str, Any]) -> str:
-        """Format every process/PID observed at this entry, across all applications."""
-        applications = entry.get("applications")
-        apps = applications if isinstance(applications, dict) else {}
-
-        combined: dict[str, set[int]] = {}
-        for app in apps.values():
-            if not isinstance(app, dict):
-                continue
-            processes = app.get("processes")
-            procs = processes if isinstance(processes, list) else []
-            proc_pids_raw = app.get("proc_pids")
-            proc_pids: dict[str, list[int]] = (
-                proc_pids_raw if isinstance(proc_pids_raw, dict) else {}
-            )
-            for name in procs:
-                if not isinstance(name, str):
-                    continue
-                name_s = name.strip()
-                if not name_s:
-                    continue
-                pid_set = combined.setdefault(name_s, set())
-                pids_raw = proc_pids.get(name_s)
-                if isinstance(pids_raw, list):
-                    pid_set.update(x for x in pids_raw if isinstance(x, int) and x > 0)
-
-        parts: list[str] = []
-        for name in sorted(combined, key=str.lower):
-            pids = sorted(combined[name])
-            if pids:
-                parts.append(f"{name} (pid {', '.join(str(x) for x in pids)})")
-            else:
-                parts.append(name)
-
-        return ", ".join(parts) if parts else "-"
