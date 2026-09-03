@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 1.11.0 (2026-09-03)
+
 ### Features
 
 - Add system tray support (Windows, macOS, Linux)
