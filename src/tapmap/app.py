@@ -25,7 +25,6 @@ import argparse
 import contextlib
 import json
 import logging
-import os
 import platform
 import sys
 import threading
@@ -33,11 +32,12 @@ import webbrowser
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar, Final, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, TypedDict
 
 import psutil
 from dash import ALL, Dash, Input, Output, State, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
+from werkzeug.serving import make_server
 
 from tapmap import __version__
 from tapmap.geodb import GeoDbService
@@ -90,8 +90,13 @@ from tapmap.ui.service_point_view import ServicePointViewBuilder
 
 from .app_dirs import open_folder, reveal_in_file_manager
 from .config import COORD_PRECISION, MY_LOCATION, POLL_INTERVAL_MS, ZOOM_NEAR_KM
+from .lifecycle import LifecycleCoordinator, start_server_thread
 from .logging_config import configure_logging
 from .runtime import AppMeta, RuntimeContext, build_runtime
+from .tray import create_tray_icon
+
+if TYPE_CHECKING:
+    from pystray import Icon
 
 LonLat = tuple[float, float]
 
@@ -132,18 +137,19 @@ class TapMap:
         }
     )
     MENU_COMMANDS: ClassVar[frozenset[str]] = frozenset(
-        {"menu_clear_cache", "menu_export_cache"}
+        {"menu_clear_cache", "menu_export_cache", "menu_autostart"}
     )
 
-    DASH_DEBUG = False
     MIN_FLASH_S = 3.0
 
     def __init__(self, runtime_ctx: RuntimeContext) -> None:
         """Build runtime state, wire Dash callbacks, and start from persisted history."""
         self.runtime = runtime_ctx
         self.logger = logging.getLogger(__name__)
+        self.lifecycle = LifecycleCoordinator()
         self._lock_path = self.runtime.app_data_dir / "tapmap.lock"
         self._acquire_lock()
+        self._run_autostart_startup_setup()
 
         self.app = Dash(
             __name__,
@@ -255,6 +261,16 @@ class TapMap:
 
         initial_body_children: list[Any] = []
         initial_body_class = "modal-body"
+        autostart_supported = self._autostart_supported()
+        initial_autostart_display_state = "off"
+        initial_autostart_disabled = True
+        if autostart_supported:
+            from tapmap.state.autostart import ClickAction
+
+            initial_decision = self._current_autostart_decision()
+            initial_autostart_display_state = initial_decision.display_state.value
+            initial_autostart_disabled = initial_decision.click_action == ClickAction.NONE
+
         if initial_modal_state is not None:
             geo_path = str(self.runtime.geo_data_dir)
             initial_body_children = self._as_children(
@@ -281,6 +297,9 @@ class TapMap:
             modal_overlay_class=self._modal_overlay_class(initial_modal_open),
             initial_insights_on=self.settings.insights_panel,
             initial_technical_details_on=self.settings.technical_details,
+            autostart_supported=autostart_supported,
+            initial_autostart_display_state=initial_autostart_display_state,
+            initial_autostart_disabled=initial_autostart_disabled,
         )
 
     @staticmethod
@@ -502,8 +521,7 @@ class TapMap:
             view = self.view_builder.build_view_from_cache(
                 self.connection_state.cache, technical_details_enabled
             )
-            flash = self._flash("Model snapshot is invalid. See terminal.", self.MIN_FLASH_S)
-            return {"error": True}, status_cache.to_store(), view, flash, no_update
+            return {"error": True}, status_cache.to_store(), view, no_update, no_update
 
         snap["runtime_info"] = self._build_runtime_info()
 
@@ -560,6 +578,10 @@ class TapMap:
         self.connection_state.refresh_resolved_applications(fields)
         self.unmapped_state.refresh_resolved_applications(fields)
 
+    def _server_url(self) -> str:
+        """Return this instance's local web UI URL."""
+        return f"http://{self.runtime.server_host}:{self.runtime.server_port}/"
+
     def _open_browser(self, url: str, delay_s: float = 0.8) -> None:
         try:
             delay = float(delay_s)
@@ -575,6 +597,12 @@ class TapMap:
         timer = threading.Timer(delay, _worker)
         timer.daemon = True
         timer.start()
+
+    @staticmethod
+    def _open_browser_immediately(url: str) -> None:
+        """Open url in the default browser synchronously, without the startup delay."""
+        with contextlib.suppress(Exception):
+            webbrowser.open(url, new=2)
 
     @staticmethod
     def _as_children(value: Any) -> list[Any]:
@@ -717,6 +745,8 @@ class TapMap:
         self._register_status_callbacks()
         self._register_insights_callbacks()
         self._register_os_callbacks()
+        if self._autostart_supported():
+            self._register_autostart_callbacks()
 
     def _register_keyboard_callbacks(self) -> None:
         @self.app.callback(
@@ -826,6 +856,7 @@ class TapMap:
             Input("menu_about", "n_clicks"),
             Input("menu_help", "n_clicks"),
             Input("menu_clear_cache", "n_clicks"),
+            Input("menu_autostart", "n_clicks", allow_optional=True),
             Input("menu_exit", "n_clicks"),
             State("menu_open", "data"),
             State("insights_on", "data"),
@@ -847,6 +878,7 @@ class TapMap:
             _info: int,
             _help: int,
             _clear: int,
+            _autostart: int | None,
             _exit: int,
             menu_open: Any,
             insights_on: Any,
@@ -1061,9 +1093,215 @@ class TapMap:
         def exit_app(key_action: Any) -> None:
             if not (isinstance(key_action, dict) and key_action.get("action") == "exit_confirmed"):
                 raise PreventUpdate
-            self.close()
-            logging.shutdown()
-            os._exit(0)
+            self.lifecycle.request_shutdown()
+
+    def _autostart_supported(self) -> bool:
+        """Return whether autostart is supported."""
+        return platform.system() in {"Windows", "Darwin", "Linux"} and not self.runtime.is_docker
+
+    def _run_autostart_startup_setup(self) -> None:
+        """Set up autostart on first launch when needed."""
+        if not self._autostart_supported():
+            return
+
+        system = platform.system()
+        try:
+            if system == "Darwin":
+                from .autostart import macos_autostart
+
+                macos_autostart.run_startup_setup(
+                    app_data_dir=self.runtime.app_data_dir,
+                    is_frozen=self.runtime.is_frozen,
+                )
+            elif system == "Windows":
+                from .autostart import windows_autostart
+
+                windows_autostart.run_startup_setup(
+                    app_data_dir=self.runtime.app_data_dir,
+                    exe_path=self._autostart_exe_path(),
+                    is_frozen=self.runtime.is_frozen,
+                )
+            elif system == "Linux":
+                from .autostart import linux_autostart
+
+                linux_autostart.run_startup_setup(
+                    app_data_dir=self.runtime.app_data_dir,
+                    exe_path=self._autostart_exe_path(),
+                    is_frozen=self.runtime.is_frozen,
+                )
+        except Exception:
+            self.logger.exception("Autostart initial setup failed unexpectedly.")
+
+    def _autostart_exe_path(self) -> str:
+        """Return the installed TapMap executable path."""
+        if not self.runtime.is_frozen:
+            return ""
+        return str(Path(sys.executable).resolve())
+
+    def _current_autostart_decision(self):
+        """Return the current autostart display decision."""
+        from tapmap.state.autostart import AutostartDecision, ClickAction, DisplayState
+
+        system = platform.system()
+
+        if system == "Darwin":
+            from tapmap.autostart.macos_autostart import query_display_state
+
+            return query_display_state(is_frozen=self.runtime.is_frozen)
+
+        if system == "Windows":
+            from tapmap.autostart.windows_autostart import query_display_state
+
+            return query_display_state(
+                exe_path=self._autostart_exe_path(), is_frozen=self.runtime.is_frozen
+            )
+
+        if system == "Linux":
+            from tapmap.autostart.linux_autostart import query_display_state
+
+            return query_display_state(is_frozen=self.runtime.is_frozen)
+
+        return AutostartDecision(DisplayState.UNAVAILABLE, ClickAction.NONE)
+
+    @staticmethod
+    def _autostart_class_name(display_state: Any) -> str:
+        """Return the CSS class for an autostart display state."""
+        from tapmap.state.autostart import DisplayState
+
+        base = "mx-btn mx-btn--menu mx-btn--toggle"
+        if display_state == DisplayState.ON:
+            return base + " is-checked"
+        if display_state == DisplayState.UNAVAILABLE:
+            return base + " is-unavailable"
+        return base
+
+    @staticmethod
+    def _autostart_disabled(decision: Any) -> bool:
+        """Return whether the autostart control should be HTML-disabled for decision."""
+        from tapmap.state.autostart import ClickAction
+
+        return decision.click_action == ClickAction.NONE
+
+    def _handle_autostart_click(self) -> None:
+        """Perform the write a click on the R control implies. A disabled control is a no-op."""
+        system = platform.system()
+        if system == "Darwin":
+            self._handle_macos_autostart_click()
+        elif system == "Windows":
+            self._handle_windows_autostart_click()
+        elif system == "Linux":
+            self._handle_linux_autostart_click()
+
+    def _handle_windows_autostart_click(self) -> None:
+        """Handle the Windows autostart action."""
+        from tapmap.autostart import windows_autostart
+        from tapmap.state.autostart import ClickAction, WriteOutcome
+
+        decision = self._current_autostart_decision()
+        exe_path = self._autostart_exe_path()
+
+        if decision.click_action == ClickAction.DISABLE:
+            outcome, error = windows_autostart.disable(exe_path=exe_path)
+        elif decision.click_action == ClickAction.ENABLE:
+            outcome, error = windows_autostart.enable(exe_path=exe_path)
+        elif decision.click_action == ClickAction.CREATE:
+            outcome, error = windows_autostart.create(exe_path=exe_path)
+        elif decision.click_action == ClickAction.REPAIR_AND_ENABLE:
+            outcome, error = windows_autostart.repair_and_enable(exe_path=exe_path)
+        else:
+            return
+
+        if outcome == WriteOutcome.ERROR:
+            self.logger.warning("Autostart write failed: %s", error)
+
+    def _handle_macos_autostart_click(self) -> None:
+        """Handle the macOS autostart action."""
+        from tapmap.autostart import macos_autostart
+        from tapmap.state.autostart import ClickAction, WriteOutcome
+
+        decision = self._current_autostart_decision()
+
+        if decision.click_action == ClickAction.DISABLE:
+            outcome, error = macos_autostart.disable()
+        elif decision.click_action == ClickAction.CREATE:
+            outcome, error = macos_autostart.create()
+        elif decision.click_action == ClickAction.RECOVER_AND_ENABLE:
+            outcome, error = macos_autostart.recover_and_enable()
+        elif decision.click_action == ClickAction.OPEN_SETTINGS:
+            macos_autostart.open_settings()
+            return
+        else:
+            return
+
+        if outcome == WriteOutcome.ERROR:
+            self.logger.warning("Autostart write failed: %s", error)
+
+    def _handle_linux_autostart_click(self) -> None:
+        """Handle the Linux autostart action."""
+        from tapmap.autostart import linux_autostart
+        from tapmap.state.autostart import ClickAction, WriteOutcome
+
+        decision = self._current_autostart_decision()
+
+        if decision.click_action == ClickAction.DISABLE:
+            outcome, error = linux_autostart.disable()
+        elif decision.click_action == ClickAction.ENABLE:
+            outcome, error = linux_autostart.enable()
+        elif decision.click_action == ClickAction.CREATE:
+            outcome, error = linux_autostart.create(exe_path=self._autostart_exe_path())
+        else:
+            return
+
+        if outcome == WriteOutcome.ERROR:
+            self.logger.warning("Autostart write failed: %s", error)
+
+    @staticmethod
+    def _autostart_trigger_kind(
+        *, trigger: Any, menu_open: Any, n_clicks: Any, key_action: Any
+    ) -> str:
+        """Classify an autostart trigger as act, refresh, or ignore."""
+        if trigger == "menu_open":
+            return "refresh" if menu_open else "ignore"
+
+        if trigger == "menu_autostart":
+            return "act" if n_clicks else "ignore"
+
+        if trigger == "key_action":
+            if isinstance(key_action, dict) and key_action.get("action") == "menu_autostart":
+                return "act"
+            return "ignore"
+
+        return "ignore"
+
+    def _register_autostart_callbacks(self) -> None:
+        @self.app.callback(
+            Output("menu_autostart", "className"),
+            Output("menu_autostart", "disabled"),
+            Input("menu_open", "data"),
+            Input("menu_autostart", "n_clicks"),
+            Input("key_action", "data"),
+            prevent_initial_call=True,
+        )
+        def autostart_controller(
+            menu_open: Any, n_clicks: int | None, key_action: Any
+        ) -> tuple[Any, Any]:
+            kind = self._autostart_trigger_kind(
+                trigger=ctx.triggered_id,
+                menu_open=menu_open,
+                n_clicks=n_clicks,
+                key_action=key_action,
+            )
+
+            if kind == "ignore":
+                raise PreventUpdate
+
+            if kind == "act":
+                self._handle_autostart_click()
+
+            decision = self._current_autostart_decision()
+            return self._autostart_class_name(decision.display_state), self._autostart_disabled(
+                decision
+            )
 
     def _register_modal_render_callbacks(self) -> None:
         @self.app.callback(
@@ -1313,13 +1551,70 @@ class TapMap:
 
             return render_insights_panel(data, selected_country=selected_country)
 
-    def run(self) -> None:
-        """Start the Dash server and launch the local UI."""
-        host = self.runtime.server_host
-        port = self.runtime.server_port
-        url = f"http://{host}:{port}/"
+    def _create_tray_icon(self) -> Icon | None:
+        """Build this instance's tray icon, or None if unavailable (Docker always has none)."""
+        if self.runtime.is_docker:
+            return None
+        return create_tray_icon(
+            icon_path=self.runtime.tray_icon_path,
+            tooltip=self.runtime.meta.name,
+            on_open=lambda: self._open_browser_immediately(self._server_url()),
+            on_quit=self.lifecycle.request_shutdown,
+        )
+
+    def _macos_browser_decision_is_deferred(self) -> bool:
+        """Return whether macOS login-launch detection is required."""
+        return (
+            platform.system() == "Darwin"
+            and self.runtime.is_frozen
+            and not self.runtime.is_docker
+            and self.runtime.launch_browser
+        )
+
+    def _macos_browser_decision(self, url: str, is_login_launch: bool) -> None:
+        """Open the browser unless macOS launched TapMap as a login item."""
+        if is_login_launch:
+            self.logger.info("Suppressing automatic browser launch: login-item launch detected.")
+            return
+        self._open_browser(url)
+
+    def _decide_browser_open(self, url: str, icon: Icon | None) -> None:
+        """Open or defer the browser according to the launch context.
+
+        Do not open the browser if macOS login-launch detection is unavailable.
+        """
+        if self._macos_browser_decision_is_deferred():
+            if icon is None:
+                self.logger.warning(
+                    "Tray unavailable; cannot detect macOS login-launch status. "
+                    "Not opening the browser automatically."
+                )
+                return
+            try:
+                from .autostart import macos_login_launch
+
+                macos_login_launch.install(
+                    lambda is_login_launch: self._macos_browser_decision(url, is_login_launch)
+                )
+            except Exception:
+                self.logger.exception(
+                    "Unable to install macOS login-launch detection. "
+                    "Not opening the browser automatically."
+                )
+            return
+
         if self.runtime.launch_browser and not self.runtime.is_docker:
             self._open_browser(url)
+
+    def run(self) -> None:
+        """Bind the server, launch the local UI, and block until shutdown is requested."""
+        host = self.runtime.server_host
+        port = self.runtime.server_port
+        url = self._server_url()
+
+        icon = self._create_tray_icon()
+
+        self._decide_browser_open(url, icon)
 
         self.logger.info(
             "Starting %s %s on %s",
@@ -1328,12 +1623,22 @@ class TapMap:
             url,
             extra={"section_break": True},
         )
-        self.app.run(
-            host=host,
-            port=port,
-            debug=self.DASH_DEBUG,
-            use_reloader=False,
-        )
+
+        server = make_server(host, port, self.app.server)
+
+        if icon is not None:
+            self.lifecycle.set_tray_icon(icon)
+
+        self.lifecycle.install_signal_handlers()
+        server_thread = start_server_thread(server, self.lifecycle)
+
+        if icon is not None:
+            self.lifecycle.run_tray(icon)
+        else:
+            self.lifecycle.wait_for_shutdown()
+
+        server.shutdown()
+        server_thread.join()
 
     @staticmethod
     def _empty_insights() -> dict[str, Any]:
@@ -1410,7 +1715,7 @@ class TapMap:
             )
 
     def _acquire_lock(self) -> None:
-        """Write a lock file, or exit if another instance is already running."""
+        """Write a lock file, or open the browser to the running instance and exit."""
         # Prevent multiple TapMap instances from accessing the same
         # application data files simultaneously. The lock file stores
         # the creator's PID and process start time. The PID locates the
@@ -1432,6 +1737,10 @@ class TapMap:
                             "Another TapMap instance is already running (PID %d). Exiting.",
                             running_process.pid,
                         )
+                        if not self.runtime.is_docker:
+                            # Open synchronously: a delayed, daemon-thread-backed
+                            # open would race the sys.exit() below and likely never run.
+                            self._open_browser_immediately(self._server_url())
                         sys.exit(1)
 
             except (
@@ -1484,19 +1793,25 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         version=f"%(prog)s {APP_META.version}",
         help="Show installed version and exit.",
     )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not open the web browser automatically at startup.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     """Run application from the command line."""
-    _build_arg_parser().parse_args(argv)
-    runtime_ctx = build_runtime(APP_META)
+    args = _build_arg_parser().parse_args(argv)
+    runtime_ctx = build_runtime(APP_META, no_browser=args.no_browser)
     configure_logging(runtime_ctx)
     app = TapMap(runtime_ctx)
     try:
         app.run()
     finally:
         app.close()
+        logging.shutdown()
 
     return 0
 

@@ -5,18 +5,19 @@ Pipeline
 1. Clean previous build artifacts.
 2. Run automated tests.
 3. Build the application with PyInstaller.
-4. Verify the application.
-5. (Optional) Package the application as a DMG.
+4. Verify the application's signature.
+5. (Optional) Require a real Developer ID identity, then package the
+   application as a DMG.
 6. (Optional) Sign, notarize and staple the DMG during packaging.
 7. (Optional) Verify the packaged release.
 
 Implementation
 --------------
 - Entry point: python tools/build.py [--package]
-- Application signing is performed by PyInstaller using the signing
-  identity provided to tapmap.spec at build time.
-- DMG signing, notarization and stapling are performed by create-dmg
-  during packaging.
+- PyInstaller signs TapMap.app during the build.
+- Local builds may use ad-hoc signing.
+- Release packaging requires a Developer ID Application identity.
+- create-dmg signs, notarizes and staples the DMG.
 """
 
 import platform
@@ -59,45 +60,37 @@ def expected_output_file() -> Path:
     return DIST_DIR / APP_NAME
 
 
-def sign_application() -> None:
-    """Sign the application bundle."""
-    app = expected_output_file()
+def require_signing_identity() -> None:
+    """Require a Developer ID Application identity for release packaging.
 
-    run(
-        [
-            "codesign",
-            "--force",
-            "--options",
-            "runtime",
-            "--timestamp",
-            "--sign",
-            get_signing_identity(),
-            str(app),
-        ],
-        capture_output=True,
-    )
-
-    print(f"[OK] Signed application ({app.name})")
+    Raises:
+        RuntimeError: If no identity is available.
+    """
+    if get_signing_identity() is None:
+        raise RuntimeError(
+            "No Developer ID Application identity found. Import TIP's Developer ID "
+            "certificate before running with --package; ordinary local builds "
+            "(without --package) don't need it."
+        )
 
 
-def verify_application(sign: bool = False) -> None:
-    """Verify the application bundle."""
+def verify_application() -> None:
+    """Verify the application bundle's code signature."""
     app = expected_output_file()
 
     if not app.exists():
         raise FileNotFoundError(f"Expected output not found: {app}")
 
-    if sign:
-        run(
-            [
-                "codesign",
-                "--verify",
-                "--deep",
-                "--strict",
-                # "--verbose=2",
-                str(app),
-            ]
-        )
+    run(
+        [
+            "codesign",
+            "--verify",
+            "--deep",
+            "--strict",
+            # "--verbose=2",
+            str(app),
+        ]
+    )
 
     print(f"[OK] Verified application ({app.name})")
 
@@ -200,6 +193,9 @@ def verify_package() -> None:
 
 def pipeline(package: bool = False) -> None:
     """Build the macOS application and optionally package it."""
+    if package:
+        require_signing_identity()
+
     setup()
     run_tests()
     build_application()
