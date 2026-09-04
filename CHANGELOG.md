@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 1.12.0 (2026-09-04)
+
 ### Features
 
 - Add Significant Connections history and detail view
