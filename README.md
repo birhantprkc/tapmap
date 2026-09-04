@@ -334,31 +334,12 @@ Run tests:
 
     pytest
 
----
-
-#### Build distribution packages (optional)
-
-Install build dependencies:
+Build the application:
 
     pip install -r requirements-build.txt
-
-Build the distribution package for the current platform:
-
     python tools/build.py
 
-The build pipeline automatically:
-
-- Runs the test suite.
-- Detects the current operating system.
-- Builds the corresponding distribution package.
-
-Output:
-
-The generated package is created in the `dist` directory.
-
-- **Windows:** Installer (`.exe`)
-- **macOS:** Disk image (`.dmg`)
-- **Linux:** Debian package (`.deb`)
+The build pipeline runs the test suite, then builds the application for the current operating system with PyInstaller. Output is created in the `dist` directory.
 
 ---
 
