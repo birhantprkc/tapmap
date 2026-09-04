@@ -87,6 +87,10 @@ from tapmap.ui.layout_view import render_layout
 from tapmap.ui.map_view import MapUI
 from tapmap.ui.modal_view import ModalTextBuilder
 from tapmap.ui.service_point_view import ServicePointViewBuilder
+from tapmap.ui.significant_connections_view import (
+    render_significant_connection_detail,
+    render_significant_connections,
+)
 
 from .app_dirs import open_folder, reveal_in_file_manager
 from .config import COORD_PRECISION, MY_LOCATION, POLL_INTERVAL_MS, ZOOM_NEAR_KM
@@ -133,6 +137,8 @@ class TapMap:
             "menu_about",
             "menu_daily_report",
             "menu_insights_log",
+            "menu_significant_connections",
+            "menu_significant_connection_detail",
             "menu_exit",
         }
     )
@@ -546,14 +552,11 @@ class TapMap:
         return snap, status_cache.to_store(), view, no_update, insights_data
 
     def _refresh_pending_app_verifications(self) -> None:
-        """Backfill AppInfo verification results that completed since the last poll.
-
-        Covers connection-state and unmapped-state entries whose connection
-        has left the current snapshot but are still retained. Never triggers
-        new AppInfo work.
-        """
+        """Backfill completed AppInfo verification results without starting new AppInfo work."""
         pending = (
-            self.connection_state.pending_exe_paths() | self.unmapped_state.pending_exe_paths()
+            self.connection_state.pending_exe_paths()
+            | self.unmapped_state.pending_exe_paths()
+            | self.significant_connections.pending_exe_paths()
         )
         if not pending:
             return
@@ -577,6 +580,7 @@ class TapMap:
         }
         self.connection_state.refresh_resolved_applications(fields)
         self.unmapped_state.refresh_resolved_applications(fields)
+        self.significant_connections.refresh_resolved_applications(fields)
 
     def _server_url(self) -> str:
         """Return this instance's local web UI URL."""
@@ -620,6 +624,7 @@ class TapMap:
             self.SCR_GEODB_MANAGEMENT,
             "menu_help",
             "menu_about",
+            "menu_significant_connections",
         }:
             return "modal-body mx-sticky-title"
         return "modal-body"
@@ -690,6 +695,33 @@ class TapMap:
             report = persist_build_daily_report(self.insights_state.insights)
             return (
                 render_daily_activity_report(report),
+                self._class_for_modal_screen(screen),
+            )
+
+        if screen == "menu_significant_connections":
+            return (
+                render_significant_connections(self.significant_connections.items),
+                self._class_for_modal_screen(screen),
+            )
+
+        if screen == "menu_significant_connection_detail":
+            event = self.significant_connections.find_by_identity(
+                timestamp=payload.get("timestamp"),
+                pid=payload.get("pid"),
+                ip=payload.get("ip"),
+                port=payload.get("port"),
+                proto=payload.get("proto"),
+            )
+            if event is None:
+                return (
+                    [
+                        html.H1("Significant Connection", className="mx-h1"),
+                        html.Pre("(this Significant Connection is no longer available)"),
+                    ],
+                    self._class_for_modal_screen(screen),
+                )
+            return (
+                render_significant_connection_detail(event),
                 self._class_for_modal_screen(screen),
             )
 
@@ -848,6 +880,7 @@ class TapMap:
             Input("menu_insights", "n_clicks"),
             Input("menu_technical_details", "n_clicks"),
             Input("menu_daily_report", "n_clicks"),
+            Input("menu_significant_connections", "n_clicks"),
             Input("menu_open_ports", "n_clicks"),
             Input("menu_unmapped", "n_clicks"),
             Input("menu_lan_local", "n_clicks"),
@@ -870,6 +903,7 @@ class TapMap:
             _insights: int,
             _technical_details: int,
             _daily_report: int,
+            _significant_connections: int,
             _open_ports: int,
             _unmapped: int,
             _lan_local: int,
@@ -1349,12 +1383,25 @@ class TapMap:
             Input("menu_about", "n_clicks"),
             Input("menu_help", "n_clicks"),
             Input("menu_daily_report", "n_clicks"),
+            Input("menu_significant_connections", "n_clicks"),
             Input("menu_exit", "n_clicks"),
             Input("btn_close", "n_clicks"),
             Input("toggle_open_ports_system", "value", allow_optional=True),
             Input("map", "clickData"),
             Input("btn_view_log", "n_clicks", allow_optional=True),
             Input("btn_log_back", "n_clicks", allow_optional=True),
+            Input(
+                {
+                    "type": "sc_row",
+                    "timestamp": ALL,
+                    "pid": ALL,
+                    "ip": ALL,
+                    "port": ALL,
+                    "proto": ALL,
+                },
+                "n_clicks",
+            ),
+            Input("btn_sc_back", "n_clicks", allow_optional=True),
             Input("key_action", "data"),
             State("modal_state", "data"),
             State("open_ports_prefs", "data"),
@@ -1368,12 +1415,15 @@ class TapMap:
             _about_clicks: int,
             _help_clicks: int,
             _daily_report_clicks: int,
+            _significant_connections_clicks: int,
             _exit_clicks: int,
             _close_clicks: int,
             toggle_system_value: Any,
             click_data: Any,
             _view_log_clicks: int | None,
             _log_back_clicks: int | None,
+            _sc_row_clicks: list[int],
+            _sc_back_clicks: int | None,
             key_action: Any,
             modal_state_data: Any,
             open_ports_prefs_data: Any,
