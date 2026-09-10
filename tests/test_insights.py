@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from tapmap.state.insights import process_insights
+from tapmap.state.insights import distinct_active_days, process_insights
 
 # Fixed base ordinal: avoids any dependency on the wall clock.
 _BASE = date(2000, 1, 1).toordinal()
@@ -577,3 +577,49 @@ class TestInputFiltering:
         insights: dict[str, Any] = {}
         process_insights(items, insights, _now(1))
         assert insights.get("applications", {}) == {}
+
+
+class TestDistinctActiveDays:
+    """Test distinct active-day counting across Insights dimensions."""
+
+    def test_empty_insights_returns_zero(self) -> None:
+        assert distinct_active_days({}) == 0
+
+    def test_empty_dimensions_return_zero(self) -> None:
+        insights = {"countries": {}, "providers": {}, "ports": {}, "applications": {}}
+        assert distinct_active_days(insights) == 0
+
+    def test_single_entry_single_bit(self) -> None:
+        insights = {"countries": {"US": {"l": _day(1), "m": _bits(0)}}}
+        assert distinct_active_days(insights) == 1
+
+    def test_same_day_across_dimensions_counts_once(self) -> None:
+        insights = {
+            "countries": {"US": {"l": _day(1), "m": _bits(0)}},
+            "providers": {"Acme Inc": {"l": _day(1), "m": _bits(0)}},
+        }
+        assert distinct_active_days(insights) == 1
+
+    def test_disjoint_days_across_dimensions_are_unioned(self) -> None:
+        insights = {
+            "countries": {"US": {"l": _day(1), "m": _bits(0)}},
+            "providers": {"Acme Inc": {"l": _day(1), "m": _bits(1, 2)}},
+        }
+        assert distinct_active_days(insights) == 3
+
+    def test_multiple_entries_same_dimension_are_unioned(self) -> None:
+        insights = {
+            "applications": {
+                "Firefox": {"l": _day(1), "m": _bits(0)},
+                "GIMP": {"l": _day(1), "m": _bits(5)},
+            }
+        }
+        assert distinct_active_days(insights) == 2
+
+    def test_malformed_entries_are_ignored(self) -> None:
+        insights: dict[str, Any] = {
+            "countries": {"US": {"l": _day(1), "m": _bits(0)}, "NO": "not-a-dict"},
+            "providers": "not-a-dict-either",
+            "ports": {"443": {"l": _day(1)}},
+        }
+        assert distinct_active_days(insights) == 1

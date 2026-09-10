@@ -5,12 +5,15 @@ import platform
 from pathlib import Path
 from typing import Any
 
+import keyring
+import keyring.errors
 import pytest
 
 import tapmap
 from tapmap import app as app_module
 from tapmap.app import APP_META, TapMap, _build_arg_parser
 from tapmap.autostart import linux_autostart, macos_autostart, windows_autostart
+from tapmap.mqtt_config import MqttConfig, mqtt_config_path, save_mqtt_config
 from tapmap.runtime import RuntimeContext
 from tapmap.state.autostart import (
     AutostartDecision,
@@ -39,6 +42,34 @@ class _FakeReader:
         self.closed = True
 
 
+class _FakeKeyring:
+    """Provide an in-memory keyring backend."""
+
+    def __init__(self) -> None:
+        self._store: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service: str, key: str) -> str | None:
+        return self._store.get((service, key))
+
+    def set_password(self, service: str, key: str, value: str) -> None:
+        self._store[(service, key)] = value
+
+    def delete_password(self, service: str, key: str) -> None:
+        try:
+            del self._store[(service, key)]
+        except KeyError:
+            raise keyring.errors.PasswordDeleteError("not found") from None
+
+
+@pytest.fixture
+def fake_keyring(monkeypatch: pytest.MonkeyPatch) -> _FakeKeyring:
+    fake = _FakeKeyring()
+    monkeypatch.setattr(keyring, "get_password", fake.get_password)
+    monkeypatch.setattr(keyring, "set_password", fake.set_password)
+    monkeypatch.setattr(keyring, "delete_password", fake.delete_password)
+    return fake
+
+
 def _runtime_ctx(tmp_path: Path, *, is_docker: bool = False) -> RuntimeContext:
     """Build a minimal runtime context for app construction tests."""
     return RuntimeContext(
@@ -56,6 +87,7 @@ def _runtime_ctx(tmp_path: Path, *, is_docker: bool = False) -> RuntimeContext:
         location_override=None,
         security_extensions_dir=tmp_path,
         tray_icon_path=tmp_path / "tapmap.ico",
+        notification_learning_days=7,
     )
 
 
@@ -180,6 +212,32 @@ def test_create_tray_icon_wires_open_and_quit_callbacks(tmp_path: Path, monkeypa
 
         captured["on_quit"]()
         app.lifecycle.wait_for_shutdown()  # must not block: on_quit() already requested it
+    finally:
+        app.close()
+
+
+def test_tapmap_has_no_mqtt_channel_without_mqtt_json(tmp_path: Path) -> None:
+    app = TapMap(_runtime_ctx(tmp_path))
+    try:
+        assert app.mqtt_channel is None
+        assert app.connection_analyzer.notification_channels == []
+    finally:
+        app.close()
+
+
+def test_tapmap_has_mqtt_channel_with_valid_mqtt_json(
+    tmp_path: Path, fake_keyring: _FakeKeyring
+) -> None:
+    save_mqtt_config(
+        mqtt_config_path(tmp_path),
+        MqttConfig(
+            host="192.0.2.1", port=1883, topic="tapmap/significant_connections", tls=False
+        ),
+    )
+    app = TapMap(_runtime_ctx(tmp_path))
+    try:
+        assert app.mqtt_channel is not None
+        assert app.connection_analyzer.notification_channels == [app.mqtt_channel]
     finally:
         app.close()
 

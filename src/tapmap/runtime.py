@@ -10,6 +10,7 @@ from .app_dirs import ensure_app_data_dir, ensure_native_app_data_dir
 from .config import (
     CACHE_RETENTION_MIN,
     LAUNCH_BROWSER,
+    NOTIFICATION_LEARNING_DAYS,
     SERVER_PORT,
 )
 
@@ -37,6 +38,7 @@ class RuntimeContext:
         security_extensions_dir: Directory containing the Microsoft Security
             Extensions wrapper DLLs (Windows only; may not exist on other OSes).
         tray_icon_path: Path to the tray icon image asset.
+        notification_learning_days: Active Insights days required before notifications begin.
     """
 
     meta: AppMeta
@@ -53,6 +55,7 @@ class RuntimeContext:
     location_override: tuple[float, float] | None
     security_extensions_dir: Path
     tray_icon_path: Path
+    notification_learning_days: int
 
     @property
     def geo_data_dir(self) -> Path:
@@ -144,6 +147,23 @@ def _get_cache_retention_min() -> int:
     except ValueError:
         return CACHE_RETENTION_MIN
 
+def _get_notification_learning_days() -> int:
+    """Return the configured notification learning period in active days."""
+    value = os.environ.get("TAPMAP_NOTIFICATION_LEARNING_DAYS")
+
+    if value is None:
+        return NOTIFICATION_LEARNING_DAYS
+
+    try:
+        parsed = int(value)
+    except ValueError:
+        return NOTIFICATION_LEARNING_DAYS
+
+    if 0 <= parsed <= 30:
+        return parsed
+
+    return NOTIFICATION_LEARNING_DAYS
+
 def _detect_docker() -> bool:
     """Return True when running in Docker."""
     return os.environ.get("TAPMAP_IN_DOCKER") == "1"
@@ -190,6 +210,7 @@ def build_runtime(meta: AppMeta, *, no_browser: bool = False) -> RuntimeContext:
     location_override = _get_location_override()
     security_extensions_dir = _get_security_extensions_dir(is_frozen, run_dir)
     tray_icon_path = _get_tray_icon_path(is_frozen, run_dir)
+    notification_learning_days = _get_notification_learning_days()
 
     return RuntimeContext(
         meta=meta,
@@ -206,6 +227,7 @@ def build_runtime(meta: AppMeta, *, no_browser: bool = False) -> RuntimeContext:
         location_override=location_override,
         security_extensions_dir=security_extensions_dir,
         tray_icon_path=tray_icon_path,
+        notification_learning_days=notification_learning_days,
     )
 
 def _detect_network_backend() -> tuple[str, str]:

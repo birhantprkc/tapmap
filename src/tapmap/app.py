@@ -34,6 +34,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, TypedDict
 
+import dash
 import psutil
 from dash import ALL, Dash, Input, Output, State, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
@@ -96,6 +97,9 @@ from .app_dirs import open_folder, reveal_in_file_manager
 from .config import COORD_PRECISION, MY_LOCATION, POLL_INTERVAL_MS, ZOOM_NEAR_KM
 from .lifecycle import LifecycleCoordinator, start_server_thread
 from .logging_config import configure_logging
+from .mqtt_cli import run_configure_mqtt
+from .mqtt_config import load_mqtt_config, mqtt_config_path
+from .notifications.mqtt import create_mqtt_channel
 from .runtime import AppMeta, RuntimeContext, build_runtime
 from .tray import create_tray_icon
 
@@ -222,12 +226,16 @@ class TapMap:
         # the loaded InsightsState, and ConnectionAnalyzer references the
         # already-loaded SignificantConnections.
         self.significance_history = SignificanceHistory.from_insights_state(self.insights_state)
+        self.mqtt_channel = create_mqtt_channel(self.runtime)
+        notification_channels = [self.mqtt_channel] if self.mqtt_channel is not None else []
         self.connection_analyzer = ConnectionAnalyzer(
             self.connection_state,
             self.unmapped_state,
             self.insights_state.insights,
             self.significant_connections,
             self.significance_history,
+            notification_channels=notification_channels,
+            notification_learning_days=self.runtime.notification_learning_days,
         )
 
         self.settings_path = self.runtime.app_data_dir / "settings.json"
@@ -373,8 +381,8 @@ class TapMap:
 
     def _build_runtime_info(self) -> dict[str, Any]:
         geo_status = self.geodb.local_status()
+        mqtt_config = load_mqtt_config(mqtt_config_path(self.runtime.app_data_dir))
         return {
-            "version": self.runtime.meta.version,
             "poll_interval_ms": POLL_INTERVAL_MS,
             "coord_precision": COORD_PRECISION,
             "zoom_near_km": ZOOM_NEAR_KM,
@@ -401,7 +409,14 @@ class TapMap:
             "cache_retention_min": self.runtime.cache_retention_min,
             "is_docker": self.runtime.is_docker,
             "geo_provider": geo_status["provider"],
-            "geo_database_date": geo_status["local_display_date"]
+            "geo_database_date": geo_status["local_display_date"],
+            "notification_learning_days": self.runtime.notification_learning_days,
+            "mqtt_configured": mqtt_config is not None,
+            "mqtt_host": mqtt_config.host if mqtt_config else None,
+            "mqtt_port": mqtt_config.port if mqtt_config else None,
+            "mqtt_topic": mqtt_config.topic if mqtt_config else None,
+            "mqtt_tls": mqtt_config.tls if mqtt_config else None,
+            "dash_version": getattr(dash, "__version__", "-"),
         }
 
     def _reload_geodb_runtime(self) -> bool:
@@ -1873,6 +1888,8 @@ class TapMap:
         appinfo_close_fn = getattr(self.model.appinfo, "close", None)
         if callable(appinfo_close_fn):
             appinfo_close_fn()
+        if self.mqtt_channel is not None:
+            self.mqtt_channel.close()
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -1893,6 +1910,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not open the web browser automatically at startup.",
     )
+    parser.add_argument(
+        "--configure-mqtt",
+        action="store_true",
+        help="Interactively configure, update, or remove MQTT notifications, then exit.",
+    )
     return parser
 
 
@@ -1900,6 +1922,10 @@ def main(argv: list[str] | None = None) -> int:
     """Run application from the command line."""
     args = _build_arg_parser().parse_args(argv)
     runtime_ctx = build_runtime(APP_META, no_browser=args.no_browser)
+
+    if args.configure_mqtt:
+        return run_configure_mqtt(runtime_ctx)
+
     configure_logging(runtime_ctx)
     app = TapMap(runtime_ctx)
     try:

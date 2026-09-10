@@ -200,3 +200,18 @@ def process_insights(
         "new": new,
         "top": top,
     }
+
+
+def distinct_active_days(insights: dict[str, Any]) -> int:
+    """Return the number of distinct active days in the 30-day Insights history."""
+    combined = 0
+    for dimension in insights.values():
+        if not isinstance(dimension, dict):
+            continue
+        for entry in dimension.values():
+            if not isinstance(entry, dict):
+                continue
+            mask = entry.get("m")
+            if isinstance(mask, int):
+                combined |= mask
+    return combined.bit_count()
