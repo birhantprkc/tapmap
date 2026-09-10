@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 1.13.0 - 2026-09-10
+
 ### Features
 
 - Add MQTT notifications for Significant Connections
