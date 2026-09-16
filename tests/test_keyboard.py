@@ -1,6 +1,24 @@
 """Tests for keyboard action parsing."""
 
+import re
+from pathlib import Path
+
 from tapmap.state import keyboard
+
+_KEYBOARD_JS_PATH = (
+    Path(__file__).resolve().parent.parent / "src" / "tapmap" / "assets" / "keyboard.js"
+)
+
+# Z is dispatched by modebar.js rather than keyboard.js.
+_KEYS_SENT_OUTSIDE_KEYBOARD_JS = {"z"}
+
+
+def _js_shortcut_keys() -> set[str]:
+    """Return single-character shortcuts allowlisted by keyboard.js."""
+    text = _KEYBOARD_JS_PATH.read_text(encoding="utf-8")
+    match = re.search(r"new Set\(\[(.*?)\]\)", text, re.DOTALL)
+    assert match is not None, "keyboard.js shortcuts Set literal not found"
+    return set(re.findall(r'"(\w)"', match.group(1)))
 
 
 class DummyDatetime:
@@ -119,3 +137,24 @@ def test_build_key_action_maps_autostart(monkeypatch) -> None:
         "action": "menu_autostart",
         "t": "2026-01-01T00:00:00",
     }
+
+
+def test_build_key_action_maps_notifications(monkeypatch) -> None:
+    """Map the N key to the notifications toggle action."""
+    monkeypatch.setattr(keyboard, "datetime", DummyDatetime)
+
+    result = keyboard.build_key_action("__n__")
+
+    assert result == {
+        "action": "menu_notifications",
+        "t": "2026-01-01T00:00:00",
+    }
+
+
+def test_keyboard_js_allows_every_single_letter_key_map_action() -> None:
+    """Require every single-letter KEY_MAP shortcut in keyboard.js."""
+    single_letter_tokens = {
+        token.strip("_") for token in keyboard.KEY_MAP if len(token.strip("_")) == 1
+    }
+
+    assert single_letter_tokens - _KEYS_SENT_OUTSIDE_KEYBOARD_JS <= _js_shortcut_keys()

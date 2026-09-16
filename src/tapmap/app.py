@@ -99,6 +99,7 @@ from .lifecycle import LifecycleCoordinator, start_server_thread
 from .logging_config import configure_logging
 from .mqtt_cli import run_configure_mqtt
 from .mqtt_config import load_mqtt_config, mqtt_config_path
+from .notifications.desktop import create_desktop_notification_channel
 from .notifications.mqtt import create_mqtt_channel
 from .runtime import AppMeta, RuntimeContext, build_runtime
 from .tray import create_tray_icon
@@ -226,8 +227,20 @@ class TapMap:
         # the loaded InsightsState, and ConnectionAnalyzer references the
         # already-loaded SignificantConnections.
         self.significance_history = SignificanceHistory.from_insights_state(self.insights_state)
+
+        self.settings_path = self.runtime.app_data_dir / "settings.json"
+        self.settings: Settings = load_settings(self.settings_path)
+
         self.mqtt_channel = create_mqtt_channel(self.runtime)
-        notification_channels = [self.mqtt_channel] if self.mqtt_channel is not None else []
+        self.desktop_notification_channel = create_desktop_notification_channel(
+            icon_path=self.runtime.tray_icon_path,
+            enabled=self.settings.desktop_notifications,
+        )
+        notification_channels = [
+            channel
+            for channel in (self.mqtt_channel, self.desktop_notification_channel)
+            if channel is not None
+        ]
         self.connection_analyzer = ConnectionAnalyzer(
             self.connection_state,
             self.unmapped_state,
@@ -237,9 +250,6 @@ class TapMap:
             notification_channels=notification_channels,
             notification_learning_days=self.runtime.notification_learning_days,
         )
-
-        self.settings_path = self.runtime.app_data_dir / "settings.json"
-        self.settings: Settings = load_settings(self.settings_path)
 
         start_fig = self.ui.create_figure(([], self.my_location))
         self.app.layout = self._build_layout(start_fig)
@@ -311,6 +321,7 @@ class TapMap:
             modal_overlay_class=self._modal_overlay_class(initial_modal_open),
             initial_insights_on=self.settings.insights_panel,
             initial_technical_details_on=self.settings.technical_details,
+            initial_notifications_on=self.settings.desktop_notifications,
             autostart_supported=autostart_supported,
             initial_autostart_display_state=initial_autostart_display_state,
             initial_autostart_disabled=initial_autostart_disabled,
@@ -411,6 +422,7 @@ class TapMap:
             "geo_provider": geo_status["provider"],
             "geo_database_date": geo_status["local_display_date"],
             "notification_learning_days": self.runtime.notification_learning_days,
+            "desktop_notifications_available": self.desktop_notification_channel is not None,
             "mqtt_configured": mqtt_config is not None,
             "mqtt_host": mqtt_config.host if mqtt_config else None,
             "mqtt_port": mqtt_config.port if mqtt_config else None,
@@ -675,6 +687,7 @@ class TapMap:
         geo_path: str,
         geodb_event: dict[str, Any] | None,
         technical_details_enabled: bool,
+        notifications_enabled: bool,
     ) -> tuple[list[Any], str]:
         """Return modal body children and CSS class for the current modal screen."""
         if not isinstance(modal_state, dict):
@@ -776,6 +789,7 @@ class TapMap:
                 is_docker=self.runtime.is_docker,
                 unmapped_cache=self.unmapped_state.cache,
                 technical_details_enabled=technical_details_enabled,
+                notifications_enabled=notifications_enabled,
             )
             return self._as_children(body), self._class_for_modal_screen(screen)
 
@@ -792,6 +806,7 @@ class TapMap:
         self._register_status_callbacks()
         self._register_insights_callbacks()
         self._register_os_callbacks()
+        self._register_notifications_callbacks()
         if self._autostart_supported():
             self._register_autostart_callbacks()
 
@@ -1326,6 +1341,62 @@ class TapMap:
 
         return "ignore"
 
+    @staticmethod
+    def _notifications_trigger_kind(
+        *, trigger: Any, menu_open: Any, n_clicks: Any, key_action: Any
+    ) -> str:
+        """Classify a notifications toggle trigger as actionable or ignored."""
+        if trigger == "menu_notifications":
+            return "act" if n_clicks else "ignore"
+
+        if trigger == "key_action":
+            if (
+                menu_open
+                and isinstance(key_action, dict)
+                and key_action.get("action") == "menu_notifications"
+            ):
+                return "act"
+            return "ignore"
+
+        return "ignore"
+
+    def _register_notifications_callbacks(self) -> None:
+        @self.app.callback(
+            Output("menu_notifications", "className"),
+            Output("notifications_on", "data"),
+            Input("menu_notifications", "n_clicks"),
+            Input("key_action", "data"),
+            State("menu_open", "data"),
+            State("notifications_on", "data"),
+            prevent_initial_call=True,
+        )
+        def notifications_controller(
+            n_clicks: int | None,
+            key_action: Any,
+            menu_open: Any,
+            notifications_on: Any,
+        ) -> tuple[str, bool]:
+            kind = self._notifications_trigger_kind(
+                trigger=ctx.triggered_id,
+                menu_open=menu_open,
+                n_clicks=n_clicks,
+                key_action=key_action,
+            )
+
+            if kind == "ignore":
+                raise PreventUpdate
+
+            new_value = not bool(notifications_on)
+            self.settings = replace(self.settings, desktop_notifications=new_value)
+            self._save_settings()
+            if self.desktop_notification_channel is not None:
+                self.desktop_notification_channel.enabled = new_value
+
+            class_name = "mx-btn mx-btn--menu mx-btn--toggle"
+            if new_value:
+                class_name += " is-checked"
+            return class_name, new_value
+
     def _register_autostart_callbacks(self) -> None:
         @self.app.callback(
             Output("menu_autostart", "className"),
@@ -1406,6 +1477,7 @@ class TapMap:
             State("ui_view", "data"),
             State("model_snapshot", "data"),
             State("technical_details_on", "data"),
+            State("notifications_on", "data"),
             prevent_initial_call=True,
         )
         def modal_content_renderer(
@@ -1413,6 +1485,7 @@ class TapMap:
             ui_view: Any,
             snapshot: Any,
             technical_details_data: Any,
+            notifications_data: Any,
         ):
             """Render the current modal screen's real content into modal_body."""
             if not isinstance(content_request, dict):
@@ -1429,6 +1502,7 @@ class TapMap:
                 geo_path,
                 geodb_event_data,
                 bool(technical_details_data),
+                bool(notifications_data),
             )
 
             return children
@@ -1661,6 +1735,11 @@ class TapMap:
 
             return render_insights_panel(data, selected_country=selected_country)
 
+    def _activate_desktop_notification_channel(self) -> None:
+        """Activate the desktop notification channel when available."""
+        if self.desktop_notification_channel is not None:
+            self.desktop_notification_channel.activate()
+
     def _create_tray_icon(self) -> Icon | None:
         """Build this instance's tray icon, or None if unavailable (Docker always has none)."""
         if self.runtime.is_docker:
@@ -1743,7 +1822,7 @@ class TapMap:
         server_thread = start_server_thread(server, self.lifecycle)
 
         if icon is not None:
-            self.lifecycle.run_tray(icon)
+            self.lifecycle.run_tray(icon, on_ready=self._activate_desktop_notification_channel)
         else:
             self.lifecycle.wait_for_shutdown()
 

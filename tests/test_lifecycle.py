@@ -95,6 +95,59 @@ def test_run_tray_honors_a_shutdown_already_requested_before_the_icon_started() 
     assert finished.is_set()
 
 
+def test_run_tray_calls_on_ready_from_within_icons_run_setup_callback() -> None:
+    """Run on_ready from pystray's setup callback."""
+    coordinator = LifecycleCoordinator()
+    calls: list[str] = []
+
+    class _FakeIcon:
+        def run(self, setup=None) -> None:
+            calls.append("run_started")
+            if setup is not None:
+                setup(self)
+
+    coordinator.run_tray(_FakeIcon(), on_ready=lambda: calls.append("on_ready"))
+
+    assert calls == ["run_started", "on_ready"]
+
+
+def test_run_tray_skips_on_ready_when_shutdown_already_requested() -> None:
+    """Skip on_ready when shutdown was already requested."""
+    coordinator = LifecycleCoordinator()
+    calls: list[str] = []
+
+    class _FakeIcon:
+        def stop(self) -> None:
+            calls.append("stop")
+
+        def run(self, setup=None) -> None:
+            if setup is not None:
+                setup(self)
+
+    icon = _FakeIcon()
+    coordinator.set_tray_icon(icon)
+    coordinator.request_shutdown()
+
+    coordinator.run_tray(icon, on_ready=lambda: calls.append("on_ready"))
+
+    assert calls == ["stop", "stop"]
+
+
+def test_run_tray_logs_and_continues_when_on_ready_raises(monkeypatch) -> None:
+    """Continue tray startup when on_ready raises."""
+    coordinator = LifecycleCoordinator()
+
+    class _FakeIcon:
+        def run(self, setup=None) -> None:
+            if setup is not None:
+                setup(self)
+
+    def _boom() -> None:
+        raise RuntimeError("activation failed")
+
+    coordinator.run_tray(_FakeIcon(), on_ready=_boom)
+
+
 def test_run_tray_always_stops_the_windows_message_loop_nudge(monkeypatch) -> None:
     """Stop the Windows message-loop timer when the tray exits.
 
