@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 1.14.0 - 2026-09-16
+
 ### Features
 
 - Add desktop notifications for Significant Connections on Windows, Linux, and macOS
