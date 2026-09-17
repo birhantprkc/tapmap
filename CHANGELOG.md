@@ -1,5 +1,11 @@
 ## Unreleased
 
+## 1.14.1 - 2026-09-17
+
+### Fixes
+
+- Stop the GeoIP database management spinner after database updates and rechecks complete.
+
 ## 1.14.0 - 2026-09-16
 
 ### Features
