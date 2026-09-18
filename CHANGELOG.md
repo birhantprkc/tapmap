@@ -1,5 +1,9 @@
 ## Unreleased
 
+### Distribution
+
+- Make TapMap available through the official Homebrew Cask repository with `brew install --cask tapmap`.
+
 ## 1.14.1 - 2026-09-17
 
 ### Fixes

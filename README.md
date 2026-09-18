@@ -25,30 +25,27 @@ It makes network activity visible and easy to explore.
 
 ## Quick start
 
-#### Download
+#### Desktop
 
-Download the latest version from the [Releases page](https://github.com/olalie/tapmap/releases).
-
-Choose the package for your platform:
+Choose an installation method for your platform.
 
 **Windows**
 
-- Download and run the Windows installer
+Download and run the Windows installer from the [Releases page](https://github.com/olalie/tapmap/releases).
+
+Windows may show a SmartScreen warning the first time you open the installer. See [Windows SmartScreen](#windows-smartscreen).
 
 **macOS**
 
-- Download and open the `.dmg` image
-- Drag **TapMap** to **Applications**
+Install with Homebrew:
+
+    brew install --cask tapmap
+
+Alternatively, download the appropriate `.dmg` image from the [Releases page](https://github.com/olalie/tapmap/releases), open it, and drag **TapMap** to **Applications**.
 
 **Linux**
 
-- Download and install the `.deb` package
-
-**Note**
-
-Windows may show a SmartScreen warning the first time you open the TapMap installer.
-
-See [Windows SmartScreen](#windows-smartscreen).
+Download and install the `.deb` package from the [Releases page](https://github.com/olalie/tapmap/releases).
 
 #### Docker (Linux host only)
 
